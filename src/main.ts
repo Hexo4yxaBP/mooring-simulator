@@ -86,6 +86,11 @@ function drawBoat(boat: Boat): void {
   ctx.rotate(boat.heading);
   ctx.drawImage(img, -(w * SCALE) / 2, -(h * SCALE) / 2, w * SCALE, h * SCALE);
   ctx.restore();
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  ctx.fillStyle = '#1C205C';
+  ctx.fill();
 }
 
 function render(): void {
