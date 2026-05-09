@@ -89,7 +89,7 @@ function drawBoat(boat: Boat): void {
 
   ctx.beginPath();
   ctx.arc(cx, cy, 4, 0, Math.PI * 2);
-  ctx.fillStyle = '#1C205C';
+  ctx.fillStyle = '#880015';
   ctx.fill();
 }
 
