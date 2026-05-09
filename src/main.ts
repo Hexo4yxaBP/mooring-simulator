@@ -17,7 +17,22 @@ interface Boat {
   heading: number; // radians, 0 = bow up (north)
 }
 
+interface RevertAnim {
+  idx: number;
+  fromX: number; fromY: number; fromHeading: number;
+  toX:   number; toY:   number; toHeading:   number;
+  startTime: number;
+  duration:  number;
+}
+
 const boats: Boat[] = [];
+let activeBoatIdx: number | null = null;
+let dragBoatIdx: number | null = null;
+let dragOffsetX = 0;
+let dragOffsetY = 0;
+let isRotating = false;
+let savedX = 0, savedY = 0, savedHeading = 0;
+let revertAnim: RevertAnim | null = null;
 
 function makeImage(src: string): HTMLImageElement {
   const img = new Image();
@@ -29,6 +44,76 @@ const boatImages: Record<BoatType, HTMLImageElement> = {
   monohull:  makeImage('/boats/monohull.svg'),
   catamaran: makeImage('/boats/catamaran.svg'),
 };
+
+// SVG group-transform metadata + hull outline paths (no centerlines).
+// Coordinates are in the SVG group's local space; the canvas transform
+// re-applies scale(1,-1) + translate to map them to screen pixels.
+const OUTLINE_PATHS: Record<BoatType, {
+  svgW: number; svgH: number; tx: number; ty: number; paths: Path2D[];
+}> = {
+  monohull: {
+    svgW: 14.513544331456156,
+    svgH: 40.284579300616784,
+    tx: 1.363737,
+    ty: 40.142290,
+    paths: [new Path2D(
+      'M 11.786070044516881 0 L 0 0 ' +
+      'C -2.7798926079868256 16.291597809404944 -0.8692287120888675 29.70275818571594 5.893035022258441 40 ' +
+      'C 12.655298756605749 29.70275818571594 14.565962652503705 16.291597809404944 11.786070044516881 0 Z',
+    )],
+  },
+  catamaran: {
+    svgW: 26.384432532508832,
+    svgH: 40.51734181436292,
+    tx: 1.409670,
+    ty: 40.258671,
+    paths: [
+      new Path2D(
+        'M 7.040310526102853 0 L 0 0 ' +
+        'C -2.996143072606003 17.083082181569583 0.4224889809398942 30.154096359788877 3.5201552630514263 40 ' +
+        'C 6.6178215451629585 30.15409635978887 10.036453598708857 17.083082181569583 7.040310526102853 0 Z',
+      ),
+      new Path2D(
+        'M 16.524781473897146 0 L 23.565092 0 ' +
+        'C 26.561235072606003 17.083082181569583 23.142603019060104 30.15409635978887 20.04493673694857 40 ' +
+        'C 16.947270454837042 30.15409635978887 13.528638401291143 17.083082181569583 16.524781473897146 0 Z',
+      ),
+      new Path2D('M 7.345880 1.873169 L 16.219211 1.873169 L 17.236977 29.730728 L 6.328115 29.730728 Z'),
+    ],
+  },
+};
+
+// Returns true when the two boats' OBBs intersect (Separating Axis Theorem).
+function obbOverlap(a: Boat, b: Boat): boolean {
+  const { w: aw, h: ah } = BOAT_SIZE[a.type];
+  const { w: bw, h: bh } = BOAT_SIZE[b.type];
+  const ahw = aw / 2, ahh = ah / 2;
+  const bhw = bw / 2, bhh = bh / 2;
+
+  const ac = Math.cos(a.heading), asin = Math.sin(a.heading);
+  const bc = Math.cos(b.heading), bsin = Math.sin(b.heading);
+  const dx = b.x - a.x, dy = b.y - a.y;
+
+  // Test 4 separating axes (2 per box local frame)
+  const axes: Array<[number, number]> = [
+    [ ac,   asin], [-asin,  ac],
+    [ bc,   bsin], [-bsin,  bc],
+  ];
+  for (const [nx, ny] of axes) {
+    const d  = Math.abs(dx * nx + dy * ny);
+    const eA = ahw * Math.abs(ac * nx + asin * ny) + ahh * Math.abs(-asin * nx + ac * ny);
+    const eB = bhw * Math.abs(bc * nx + bsin * ny) + bhh * Math.abs(-bsin * nx + bc * ny);
+    if (d > eA + eB) return false;
+  }
+  return true;
+}
+
+function anyOverlap(idx: number): boolean {
+  for (let i = 0; i < boats.length; i++) {
+    if (i !== idx && obbOverlap(boats[idx], boats[i])) return true;
+  }
+  return false;
+}
 
 function resize(): void {
   const palette = document.getElementById('palette')!;
@@ -74,7 +159,7 @@ function drawWater(): void {
   }
 }
 
-function drawBoat(boat: Boat): void {
+function drawBoat(boat: Boat, isActive: boolean): void {
   const img = boatImages[boat.type];
   if (!img.complete || img.naturalWidth === 0) return;
 
@@ -85,12 +170,75 @@ function drawBoat(boat: Boat): void {
   ctx.translate(cx, cy);
   ctx.rotate(boat.heading);
   ctx.drawImage(img, -(w * SCALE) / 2, -(h * SCALE) / 2, w * SCALE, h * SCALE);
+
+  if (isActive) {
+    const meta = OUTLINE_PATHS[boat.type];
+    const scaleX = (w * SCALE) / meta.svgW;
+    const scaleY = (h * SCALE) / meta.svgH;
+    ctx.save();
+    ctx.transform(
+      scaleX, 0, 0, -scaleY,
+      meta.tx * scaleX - (w * SCALE) / 2,
+      meta.ty * scaleY - (h * SCALE) / 2,
+    );
+    ctx.strokeStyle = '#FFD700';
+    ctx.lineWidth = 2 / Math.sqrt(scaleX * scaleY);
+    for (const p of meta.paths) ctx.stroke(p);
+    ctx.restore();
+
+    // Bow and stern rotation handles
+    const hw = (h * SCALE) / 2;
+    ctx.strokeStyle = '#FFD700';
+    ctx.fillStyle = 'rgba(255, 215, 0, 0.3)';
+    ctx.lineWidth = 2;
+    for (const hy of [-hw, hw]) {
+      ctx.beginPath();
+      ctx.arc(0, hy, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
   ctx.restore();
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  ctx.fillStyle = '#880015';
+  ctx.fill();
+}
+
+function endDrag(): void {
+  const idx = dragBoatIdx;
+  if (idx !== null && anyOverlap(idx)) {
+    revertAnim = {
+      idx,
+      fromX: boats[idx].x, fromY: boats[idx].y, fromHeading: boats[idx].heading,
+      toX: savedX, toY: savedY, toHeading: savedHeading,
+      startTime: performance.now(),
+      duration: 450,
+    };
+  }
+  dragBoatIdx = null;
+  isRotating  = false;
 }
 
 function render(): void {
+  // Advance revert animation (only when the boat is not being dragged)
+  if (revertAnim !== null && revertAnim.idx !== dragBoatIdx) {
+    const t    = Math.min((performance.now() - revertAnim.startTime) / revertAnim.duration, 1);
+    const ease = 1 - (1 - t) ** 3; // cubic ease-out
+    const ra   = revertAnim;
+    boats[ra.idx].x = ra.fromX + (ra.toX - ra.fromX) * ease;
+    boats[ra.idx].y = ra.fromY + (ra.toY - ra.fromY) * ease;
+    let da = ra.toHeading - ra.fromHeading;
+    while (da >  Math.PI) da -= 2 * Math.PI;
+    while (da < -Math.PI) da += 2 * Math.PI;
+    boats[ra.idx].heading = ra.fromHeading + da * ease;
+    if (t >= 1) revertAnim = null;
+  }
+
   drawWater();
-  boats.forEach(drawBoat);
+  boats.forEach((boat, i) => drawBoat(boat, i === activeBoatIdx));
   requestAnimationFrame(render);
 }
 
@@ -102,6 +250,78 @@ document.querySelectorAll<HTMLElement>('.boat-icon').forEach(el => {
   });
 });
 
+canvas.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const [wx, wy] = canvasToWorld(mx, my);
+
+  // Check bow/stern handles of the active boat first → rotation
+  if (activeBoatIdx !== null) {
+    const boat = boats[activeBoatIdx];
+    const { h } = BOAT_SIZE[boat.type];
+    const [cx, cy] = worldToCanvas(boat.x, boat.y);
+    const hw = (h * SCALE) / 2;
+    const sin = Math.sin(boat.heading);
+    const cos = Math.cos(boat.heading);
+    const bowCx   = cx + hw * sin;
+    const bowCy   = cy - hw * cos;
+    const sternCx = cx - hw * sin;
+    const sternCy = cy + hw * cos;
+    const R = 14;
+    if (
+      (mx - bowCx)   ** 2 + (my - bowCy)   ** 2 <= R * R ||
+      (mx - sternCx) ** 2 + (my - sternCy) ** 2 <= R * R
+    ) {
+      savedX = boat.x; savedY = boat.y; savedHeading = boat.heading;
+      if (revertAnim?.idx === activeBoatIdx) revertAnim = null;
+      dragBoatIdx = activeBoatIdx;
+      isRotating  = true;
+      e.preventDefault();
+      return;
+    }
+  }
+
+  // Check boat bodies → select + move
+  dragBoatIdx  = null;
+  isRotating   = false;
+  activeBoatIdx = null;
+  for (let i = boats.length - 1; i >= 0; i--) {
+    const { x, y, type } = boats[i];
+    const { w, h } = BOAT_SIZE[type];
+    if ((wx - x) ** 2 + (wy - y) ** 2 <= (Math.max(w, h) / 2) ** 2) {
+      savedX = x; savedY = y; savedHeading = boats[i].heading;
+      if (revertAnim?.idx === i) revertAnim = null;
+      activeBoatIdx = i;
+      dragBoatIdx   = i;
+      dragOffsetX   = wx - x;
+      dragOffsetY   = wy - y;
+      e.preventDefault();
+      return;
+    }
+  }
+});
+
+canvas.addEventListener('mousemove', e => {
+  const idx = dragBoatIdx;
+  if (idx === null) return;
+  const rect = canvas.getBoundingClientRect();
+  if (isRotating) {
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const [cx, cy] = worldToCanvas(boats[idx].x, boats[idx].y);
+    boats[idx].heading = Math.atan2(mx - cx, -(my - cy));
+  } else {
+    const [wx, wy] = canvasToWorld(e.clientX - rect.left, e.clientY - rect.top);
+    boats[idx].x = wx - dragOffsetX;
+    boats[idx].y = wy - dragOffsetY;
+  }
+});
+
+canvas.addEventListener('mouseup',    endDrag);
+canvas.addEventListener('mouseleave', endDrag);
+
 canvas.addEventListener('dragover', e => e.preventDefault());
 
 canvas.addEventListener('drop', e => {
@@ -110,6 +330,7 @@ canvas.addEventListener('drop', e => {
   const rect = canvas.getBoundingClientRect();
   const [wx, wy] = canvasToWorld(e.clientX - rect.left, e.clientY - rect.top);
   boats.push({ type: dragType, x: wx, y: wy, heading: 0 });
+  if (anyOverlap(boats.length - 1)) boats.pop();
   dragType = null;
 });
 
