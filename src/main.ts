@@ -34,11 +34,16 @@ let isRotating = false;
 let savedX = 0, savedY = 0, savedHeading = 0;
 let revertAnim: RevertAnim | null = null;
 
+const PIER_DEPTH_M = 5;   // pier depth in world-meters
+const PLANK_W_M    = 0.5; // each plank width in world-meters (≈ 1:10 aspect at 5m deep)
+
 function makeImage(src: string): HTMLImageElement {
   const img = new Image();
   img.src = src;
   return img;
 }
+
+const plankImage = makeImage('/pier/plank.svg');
 
 const boatImages: Record<BoatType, HTMLImageElement> = {
   monohull:  makeImage('/boats/monohull.svg'),
@@ -159,6 +164,27 @@ function drawWater(): void {
   }
 }
 
+function drawPier(): void {
+  const depthPx  = PIER_DEPTH_M * SCALE;
+  const plankPxW = PLANK_W_M * SCALE;
+  const plankPxH = depthPx;
+  const y = canvas.height - depthPx;
+
+  if (plankImage.complete && plankImage.naturalWidth !== 0) {
+    const count = Math.ceil(canvas.width / plankPxW) + 1;
+    for (let i = 0; i < count; i++) {
+      ctx.drawImage(plankImage, i * plankPxW, y, plankPxW, plankPxH);
+    }
+  } else {
+    ctx.fillStyle = '#B9A999';
+    ctx.fillRect(0, y, canvas.width, depthPx);
+  }
+
+  // Waterline beam
+  ctx.fillStyle = '#6B5744';
+  ctx.fillRect(0, y, canvas.width, 4);
+}
+
 function drawBoat(boat: Boat, isActive: boolean): void {
   const img = boatImages[boat.type];
   if (!img.complete || img.naturalWidth === 0) return;
@@ -238,6 +264,7 @@ function render(): void {
   }
 
   drawWater();
+  drawPier();
   boats.forEach((boat, i) => drawBoat(boat, i === activeBoatIdx));
   requestAnimationFrame(render);
 }
