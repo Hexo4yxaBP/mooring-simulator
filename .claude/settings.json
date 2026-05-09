@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go get *)",
+      "Bash(go build *)",
+      "Bash(go test *)",
+      "Bash(go tool *)",
+      "Bash(go vet *)",
+      "Bash(govulncheck ./...)",
+      "Bash(go run *)",
+      "Bash(go list *)",
+      "PowerShell(cd \"c:\\\\Users\\\\black\\\\OneDrive\\\\Dev\\\\mooring-simulator\"; $env:GOOS=\"js\"; $env:GOARCH=\"wasm\"; go build -o main.wasm . 2>&1)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\black\\\\OneDrive\\\\Dev\\\\mooring-simulator\" -Force)",
+      "Bash(Select-Object Name, FullName, PSIsContainer)",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\black\\\\OneDrive\\\\Dev\\\\mooring-simulator\" | Format-Table Name, @{Name=\"Type\"; Expression={if\\($_.PSIsContainer\\){\"DIR\"}else{\"FILE\"}}})",
+      "Bash(rm -f src/physics/world.ts src/physics/forces.ts src/physics/integration.ts src/physics/mooring.ts src/physics/boat.ts src/rendering/renderer.ts src/state/scene.ts src/ui/mooring.ts src/persistence/storage.ts)",
+      "Bash(rmdir src/physics src/rendering src/state src/ui src/persistence)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)"
+    ]
+  }
+}

@@ -4,7 +4,9 @@
       "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\black\\\\OneDrive\\\\Dev\\\\mooring-simulator\" -Force)",
       "Bash(Select-Object Name, Mode)",
       "Bash(git show-ref *)",
-      "Bash(git config *)"
+      "Bash(git config *)",
+      "Bash(go version *)",
+      "Bash(go mod *)"
     ]
   }
 }
