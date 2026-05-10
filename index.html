@@ -65,6 +65,173 @@
       display: block;
       cursor: crosshair;
     }
+
+    #rudder-panel {
+      position: fixed;
+      bottom: 24px;
+      left: calc(60px + 50vw);
+      transform: translateX(-50%);
+      background: rgba(15, 28, 43, 0.90);
+      border: 1px solid #2d4a6b;
+      border-radius: 8px;
+      padding: 10px 18px 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      z-index: 10;
+      color: #7ab5d4;
+      font-size: 12px;
+      font-weight: 600;
+      user-select: none;
+    }
+
+    #rudder-slider {
+      width: 160px;
+      cursor: pointer;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      border-radius: 2px;
+      outline: none;
+      background: #2d4a6b;
+    }
+
+    #rudder-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #7ab5d4;
+      cursor: pointer;
+    }
+
+    #rudder-slider::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #7ab5d4;
+      cursor: pointer;
+      border: none;
+    }
+
+    #rudder-slider::-moz-range-track {
+      background: transparent;
+      height: 4px;
+    }
+
+    #throttle-panel {
+      position: fixed;
+      right: 24px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: rgba(15, 28, 43, 0.90);
+      border: 1px solid #2d4a6b;
+      border-radius: 8px;
+      padding: 10px 14px 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      z-index: 10;
+      color: #7ab5d4;
+      font-weight: 600;
+      user-select: none;
+    }
+
+    #throttle-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    #throttle-body {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    /* tick labels column — absolute-positioned to align with slider thumbs */
+    #throttle-labels {
+      position: relative;
+      width: 12px;
+      height: 158px; /* 18px col-header + 140px slider */
+    }
+
+    #throttle-labels span {
+      position: absolute;
+      right: 0;
+      font-size: 11px;
+      line-height: 1;
+      transform: translateY(-50%);
+    }
+
+    /* positions = 18px col-header offset + thumb travel positions */
+    #throttle-labels span:nth-child(1) { top: 25px; }
+    #throttle-labels span:nth-child(2) { top: 56.5px; }
+    #throttle-labels span:nth-child(3) { top: 88px; }
+    #throttle-labels span:nth-child(4) { top: 119.5px; }
+    #throttle-labels span:nth-child(5) { top: 151px; }
+
+    /* one column = col-header + vertical slider */
+    .t-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .t-hdr {
+      font-size: 11px;
+      line-height: 1;
+      height: 14px;
+      display: flex;
+      align-items: center;
+    }
+
+    .t-wrap {
+      width: 20px;
+      height: 140px;
+      position: relative;
+    }
+
+    .tslider {
+      -webkit-appearance: none;
+      appearance: none;
+      position: absolute;
+      width: 140px;
+      height: 4px;
+      top: calc(50% - 2px);
+      left: calc(50% - 70px);
+      transform: rotate(-90deg);
+      background: #2d4a6b;
+      outline: none;
+      cursor: pointer;
+      border-radius: 2px;
+    }
+
+    .tslider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #7ab5d4;
+      cursor: pointer;
+    }
+
+    .tslider::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #7ab5d4;
+      cursor: pointer;
+      border: none;
+    }
+
+    .tslider::-moz-range-track {
+      background: transparent;
+      height: 4px;
+    }
   </style>
 </head>
 <body>
@@ -80,6 +247,34 @@
     </div>
   </aside>
   <canvas id="canvas"></canvas>
+  <div id="throttle-panel" style="display:none">
+    <div id="throttle-title">Throttle</div>
+    <div id="throttle-body">
+      <div id="throttle-labels">
+        <span>F</span>
+        <span>A</span>
+        <span>N</span>
+        <span>S</span>
+        <span>R</span>
+      </div>
+      <div class="t-col">
+        <span class="t-hdr" id="t-hdr-p">P</span>
+        <div class="t-wrap">
+          <input class="tslider" id="tslider-p" type="range" min="0" max="4" step="1" value="2">
+        </div>
+      </div>
+      <div class="t-col" id="t-col-s">
+        <span class="t-hdr">S</span>
+        <div class="t-wrap">
+          <input class="tslider" id="tslider-s" type="range" min="0" max="4" step="1" value="2">
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="rudder-panel" style="display:none">
+    <span>Rudder: <strong id="rudder-deg">0</strong>°</span>
+    <input id="rudder-slider" type="range" min="-35" max="35" step="1" value="0">
+  </div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
