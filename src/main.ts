@@ -14,7 +14,10 @@ interface Boat {
   type: BoatType;
   x: number;
   y: number;
-  heading: number; // radians, 0 = bow up (north)
+  heading: number;     // radians, 0 = bow up (north)
+  rudderAngle: number; // radians, +ve = starboard, range ±35°
+  throttlePort: number; // 0=full astern … 2=neutral … 4=full ahead
+  throttleStbd: number; // catamaran only; mirrors throttlePort for monohull (unused)
 }
 
 interface RevertAnim {
@@ -60,6 +63,7 @@ const CLEAT_FILL   = '#FFC90E';
 const MOVING_CLEAT = '#22B14C';  // boat cleats
 const STATIC_CLEAT = '#ED1C24';  // pier / buoy cleats
 const BUOY_DIST_M  = 15;         // 1.5 × monohull 10 m
+const RUDDER_LEN   = 1.0 * SCALE; // visual rudder blade length in pixels
 
 function makeImage(src: string): HTMLImageElement {
   const img = new Image();
@@ -395,6 +399,25 @@ function drawBoat(boat: Boat, isActive: boolean): void {
     );
   }
 
+  // Rudder(s) — stern attachment derived from hull outline stern cleat positions
+  const sternSVG: Array<[number, number]> =
+    boat.type === 'monohull'
+      ? [[(CLEAT_SVG.monohull[0][0] + CLEAT_SVG.monohull[1][0]) / 2, 0] as [number, number]]
+      : [[CLEAT_SVG.catamaran[4][0], 0], [CLEAT_SVG.catamaran[5][0], 0]];
+  ctx.strokeStyle = '#000000';
+  ctx.lineWidth = 3;
+  for (const [sx, sy] of sternSVG) {
+    const rx = (sx + meta.tx) * scaleX - (w * SCALE) / 2;
+    const ry = (meta.ty - sy) * scaleY - (h * SCALE) / 2;
+    ctx.beginPath();
+    ctx.moveTo(rx, ry);
+    ctx.lineTo(
+      rx + RUDDER_LEN * Math.sin(boat.rudderAngle),
+      ry + RUDDER_LEN * Math.cos(boat.rudderAngle),
+    );
+    ctx.stroke();
+  }
+
   if (isActive) {
     ctx.save();
     ctx.transform(
@@ -585,10 +608,14 @@ canvas.addEventListener('mousedown', e => {
       dragBoatIdx   = i;
       dragOffsetX   = wx - x;
       dragOffsetY   = wy - y;
+      syncRudderUI();
+      syncThrottleUI();
       e.preventDefault();
       return;
     }
   }
+  syncRudderUI();
+  syncThrottleUI();
 });
 
 canvas.addEventListener('mousemove', e => {
@@ -640,9 +667,92 @@ canvas.addEventListener('drop', e => {
   if (!dragType) return;
   const rect = canvas.getBoundingClientRect();
   const [wx, wy] = canvasToWorld(e.clientX - rect.left, e.clientY - rect.top);
-  boats.push({ type: dragType, x: wx, y: wy, heading: 0 });
+  boats.push({ type: dragType, x: wx, y: wy, heading: 0, rudderAngle: 0, throttlePort: 2, throttleStbd: 2 });
   if (anyOverlap(boats.length - 1)) boats.pop();
   dragType = null;
+});
+
+const rudderPanel    = document.getElementById('rudder-panel')!   as HTMLElement;
+const rudderSlider   = document.getElementById('rudder-slider')!  as HTMLInputElement;
+const rudderDeg      = document.getElementById('rudder-deg')!     as HTMLElement;
+const throttlePanel = document.getElementById('throttle-panel')! as HTMLElement;
+const tSliderP      = document.getElementById('tslider-p')!      as HTMLInputElement;
+const tSliderS      = document.getElementById('tslider-s')!      as HTMLInputElement;
+const tHdrP         = document.getElementById('t-hdr-p')!        as HTMLElement;
+const tColS         = document.getElementById('t-col-s')!        as HTMLElement;
+
+function updateThrottleTrack(slider: HTMLInputElement): void {
+  const v = Number(slider.value);
+  const pos = (v / 4) * 100;
+  const lo = v >= 2 ? 50 : pos;
+  const hi = v >= 2 ? pos : 50;
+  const t = '#2d4a6b', f = '#7ab5d4';
+  slider.style.background =
+    `linear-gradient(to right,${t} ${lo}%,${f} ${lo}%,${f} ${hi}%,${t} ${hi}%)`;
+}
+
+function syncThrottleUI(): void {
+  if (activeBoatIdx === null) {
+    throttlePanel.style.display = 'none';
+    return;
+  }
+  throttlePanel.style.display = '';
+  const boat = boats[activeBoatIdx];
+  const isCat = boat.type === 'catamaran';
+  tHdrP.style.visibility = isCat ? 'visible' : 'hidden';
+  tColS.style.display     = isCat ? ''        : 'none';
+  tSliderP.value = String(boat.throttlePort);
+  tSliderS.value = String(boat.throttleStbd);
+  updateThrottleTrack(tSliderP);
+  updateThrottleTrack(tSliderS);
+}
+
+tSliderP.addEventListener('input', () => {
+  if (activeBoatIdx === null) return;
+  boats[activeBoatIdx].throttlePort = Number(tSliderP.value);
+  updateThrottleTrack(tSliderP);
+});
+
+tSliderS.addEventListener('input', () => {
+  if (activeBoatIdx === null) return;
+  boats[activeBoatIdx].throttleStbd = Number(tSliderS.value);
+  updateThrottleTrack(tSliderS);
+});
+
+function updateRudderTrack(): void {
+  const v = Number(rudderSlider.value);
+  const lo = v >= 0 ? 50 : 50 + (v / 70 * 100);
+  const hi = v >= 0 ? 50 + (v / 70 * 100) : 50;
+  const t = '#2d4a6b', f = '#7ab5d4';
+  rudderSlider.style.background =
+    `linear-gradient(to right,${t} ${lo}%,${f} ${lo}%,${f} ${hi}%,${t} ${hi}%)`;
+}
+
+function syncRudderUI(): void {
+  if (activeBoatIdx === null) {
+    rudderPanel.style.display = 'none';
+    return;
+  }
+  rudderPanel.style.display = '';
+  const deg = Math.round(boats[activeBoatIdx].rudderAngle * 180 / Math.PI);
+  rudderSlider.value    = String(deg);
+  rudderDeg.textContent = String(deg);
+  updateRudderTrack();
+}
+
+rudderSlider.addEventListener('input', () => {
+  if (activeBoatIdx === null) return;
+  boats[activeBoatIdx].rudderAngle = Number(rudderSlider.value) * Math.PI / 180;
+  rudderDeg.textContent = rudderSlider.value;
+  updateRudderTrack();
+});
+
+rudderPanel.addEventListener('dblclick', () => {
+  if (activeBoatIdx === null) return;
+  boats[activeBoatIdx].rudderAngle = 0;
+  rudderDeg.textContent = '0';
+  rudderSlider.value = '0';
+  updateRudderTrack();
 });
 
 window.addEventListener('resize', resize);
