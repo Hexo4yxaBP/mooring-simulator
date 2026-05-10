@@ -25,6 +25,12 @@ interface RevertAnim {
   duration:  number;
 }
 
+interface OBB {
+  x: number; y: number;
+  w: number; h: number;
+  heading: number;
+}
+
 const boats: Boat[] = [];
 let activeBoatIdx: number | null = null;
 let dragBoatIdx: number | null = null;
@@ -88,36 +94,90 @@ const OUTLINE_PATHS: Record<BoatType, {
   },
 };
 
-// Returns true when the two boats' OBBs intersect (Separating Axis Theorem).
-function obbOverlap(a: Boat, b: Boat): boolean {
-  const { w: aw, h: ah } = BOAT_SIZE[a.type];
-  const { w: bw, h: bh } = BOAT_SIZE[b.type];
-  const ahw = aw / 2, ahh = ah / 2;
-  const bhw = bw / 2, bhh = bh / 2;
+function boatToOBB(boat: Boat): OBB {
+  const { w, h } = BOAT_SIZE[boat.type];
+  return { x: boat.x, y: boat.y, w, h, heading: boat.heading };
+}
+
+function getPierOBB(): OBB {
+  const w = canvas.width / SCALE + 40;
+  // Extend pier far below the screen so the bottom edge is never the closest exit;
+  // the MTV will always push a boat upward through the waterline.
+  const pierTopY = -(canvas.height / 2) / SCALE + PIER_DEPTH_M;
+  const h = PIER_DEPTH_M + 1000;
+  return { x: 0, y: pierTopY - h / 2, w, h, heading: 0 };
+}
+
+// SAT OBB test. Returns the minimum translation vector to push `a` out of `b`,
+// or null if the boxes do not intersect.
+function obbMTV(a: OBB, b: OBB): [number, number] | null {
+  const ahw = a.w / 2, ahh = a.h / 2;
+  const bhw = b.w / 2, bhh = b.h / 2;
 
   const ac = Math.cos(a.heading), asin = Math.sin(a.heading);
   const bc = Math.cos(b.heading), bsin = Math.sin(b.heading);
   const dx = b.x - a.x, dy = b.y - a.y;
 
-  // Test 4 separating axes (2 per box local frame)
   const axes: Array<[number, number]> = [
     [ ac,   asin], [-asin,  ac],
     [ bc,   bsin], [-bsin,  bc],
   ];
+
+  let minOverlap = Infinity;
+  let mtx = 0, mty = 0;
+
   for (const [nx, ny] of axes) {
-    const d  = Math.abs(dx * nx + dy * ny);
-    const eA = ahw * Math.abs(ac * nx + asin * ny) + ahh * Math.abs(-asin * nx + ac * ny);
-    const eB = bhw * Math.abs(bc * nx + bsin * ny) + bhh * Math.abs(-bsin * nx + bc * ny);
-    if (d > eA + eB) return false;
+    const dn  = dx * nx + dy * ny;
+    const eA  = ahw * Math.abs(ac * nx + asin * ny) + ahh * Math.abs(-asin * nx + ac * ny);
+    const eB  = bhw * Math.abs(bc * nx + bsin * ny) + bhh * Math.abs(-bsin * nx + bc * ny);
+    const ov  = eA + eB - Math.abs(dn);
+    if (ov <= 0) return null;
+    if (ov < minOverlap) {
+      minOverlap = ov;
+      const sign = dn >= 0 ? -1 : 1;
+      mtx = sign * ov * nx;
+      mty = sign * ov * ny;
+    }
   }
-  return true;
+
+  return [mtx, mty];
 }
 
 function anyOverlap(idx: number): boolean {
+  const a = boatToOBB(boats[idx]);
   for (let i = 0; i < boats.length; i++) {
-    if (i !== idx && obbOverlap(boats[idx], boats[i])) return true;
+    if (i !== idx && obbMTV(a, boatToOBB(boats[i])) !== null) return true;
   }
-  return false;
+  return obbMTV(a, getPierOBB()) !== null;
+}
+
+// Iteratively push `boats[idx]` out of all obstacles (boats + pier) using MTV.
+// Returns the nearest valid {x, y, heading}, falling back to saved state if unresolvable.
+function findNearestValid(idx: number): { x: number; y: number; heading: number } {
+  let x = boats[idx].x;
+  let y = boats[idx].y;
+  const { w, h } = BOAT_SIZE[boats[idx].type];
+  const heading = boats[idx].heading;
+
+  const obstacles: OBB[] = [
+    ...boats.filter((_, i) => i !== idx).map(boatToOBB),
+    getPierOBB(),
+  ];
+
+  for (let iter = 0; iter < 20; iter++) {
+    let moved = false;
+    for (const obs of obstacles) {
+      const mtv = obbMTV({ x, y, w, h, heading }, obs);
+      if (mtv !== null) {
+        x += mtv[0];
+        y += mtv[1];
+        moved = true;
+      }
+    }
+    if (!moved) return { x, y, heading };
+  }
+
+  return { x: savedX, y: savedY, heading: savedHeading };
 }
 
 function resize(): void {
@@ -236,10 +296,11 @@ function drawBoat(boat: Boat, isActive: boolean): void {
 function endDrag(): void {
   const idx = dragBoatIdx;
   if (idx !== null && anyOverlap(idx)) {
+    const target = findNearestValid(idx);
     revertAnim = {
       idx,
       fromX: boats[idx].x, fromY: boats[idx].y, fromHeading: boats[idx].heading,
-      toX: savedX, toY: savedY, toHeading: savedHeading,
+      toX: target.x, toY: target.y, toHeading: target.heading,
       startTime: performance.now(),
       duration: 450,
     };
