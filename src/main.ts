@@ -118,9 +118,11 @@ function obbMTV(a: OBB, b: OBB): [number, number] | null {
   const bc = Math.cos(b.heading), bsin = Math.sin(b.heading);
   const dx = b.x - a.x, dy = b.y - a.y;
 
+  // World-space principal axes (bow-stern: (sin h, cos h), beam: (cos h, -sin h))
+  // because ctx.rotate maps canvas-local (0,-1) [bow] to world (sin h, cos h) after Y-flip.
   const axes: Array<[number, number]> = [
-    [ ac,   asin], [-asin,  ac],
-    [ bc,   bsin], [-bsin,  bc],
+    [asin,  ac], [ ac, -asin],
+    [bsin,  bc], [ bc, -bsin],
   ];
 
   let minOverlap = Infinity;
@@ -128,8 +130,8 @@ function obbMTV(a: OBB, b: OBB): [number, number] | null {
 
   for (const [nx, ny] of axes) {
     const dn  = dx * nx + dy * ny;
-    const eA  = ahw * Math.abs(ac * nx + asin * ny) + ahh * Math.abs(-asin * nx + ac * ny);
-    const eB  = bhw * Math.abs(bc * nx + bsin * ny) + bhh * Math.abs(-bsin * nx + bc * ny);
+    const eA  = ahh * Math.abs(asin * nx + ac   * ny) + ahw * Math.abs(ac   * nx - asin * ny);
+    const eB  = bhh * Math.abs(bsin * nx + bc   * ny) + bhw * Math.abs(bc   * nx - bsin * ny);
     const ov  = eA + eB - Math.abs(dn);
     if (ov <= 0) return null;
     if (ov < minOverlap) {
