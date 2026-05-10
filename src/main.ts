@@ -43,6 +43,13 @@ let revertAnim: RevertAnim | null = null;
 const PIER_DEPTH_M = 5;   // pier depth in world-meters
 const PLANK_W_M    = 0.5; // each plank width in world-meters (≈ 1:10 aspect at 5m deep)
 
+const CLEAT_R      = 5;          // cleat circle radius in pixels
+const CLEAT_SW     = 1.5;        // cleat stroke width in pixels
+const CLEAT_FILL   = '#FFC90E';
+const MOVING_CLEAT = '#22B14C';  // boat cleats
+const STATIC_CLEAT = '#ED1C24';  // pier / buoy cleats
+const BUOY_DIST_M  = 15;         // 1.5 × monohull 10 m
+
 function makeImage(src: string): HTMLImageElement {
   const img = new Image();
   img.src = src;
@@ -54,6 +61,29 @@ const plankImage = makeImage('/pier/plank.svg');
 const boatImages: Record<BoatType, HTMLImageElement> = {
   monohull:  makeImage('/boats/monohull.svg'),
   catamaran: makeImage('/boats/catamaran.svg'),
+};
+
+// Cleat positions in SVG path-space (same coordinate system as OUTLINE_PATHS paths).
+// Points are on the hull outline: stern corners, widest-point midships, and near-bow sides.
+// Monohull midship/bow computed from cubic bezier parametric solve (t≈0.295 / t≈0.875).
+// Catamaran midship similarly; bow = exact hull tip coordinates from SVG.
+const CLEAT_SVG: Record<BoatType, Array<[number, number]>> = {
+  monohull: [
+    [ 0,       0      ],  // port stern corner
+    [11.786,   0      ],  // starboard stern corner
+    [-1.085,  18.0    ],  // port midship (hull outline, midway between bow y=36 and stern y=0)
+    [12.871,  18.0    ],  // starboard midship
+    [ 3.585,  36.0    ],  // port bow (~1 m from tip, t≈0.875)
+    [ 8.202,  36.0    ],  // starboard bow
+  ],
+  catamaran: [
+    [ 0,       0      ],  // port stern (left hull outer)
+    [23.565,   0      ],  // starboard stern (right hull outer)
+    [-0.831,  20.0    ],  // port midship (left hull outline at exact hull midpoint)
+    [24.396,  20.0    ],  // starboard midship (right hull outline at exact hull midpoint)
+    [ 3.520,  40.0    ],  // left hull bow tip
+    [20.045,  40.0    ],  // right hull bow tip
+  ],
 };
 
 // SVG group-transform metadata + hull outline paths (no centerlines).
@@ -247,22 +277,64 @@ function drawPier(): void {
   ctx.fillRect(0, y, canvas.width, 4);
 }
 
+function drawCleat(cx: number, cy: number, stroke: string): void {
+  ctx.beginPath();
+  ctx.arc(cx, cy, CLEAT_R, 0, Math.PI * 2);
+  ctx.fillStyle   = CLEAT_FILL;
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth   = CLEAT_SW;
+  ctx.fill();
+  ctx.stroke();
+}
+
+function drawPierCleats(): void {
+  const plankPxW = PLANK_W_M * SCALE;
+  const pierTopY = -(canvas.height / 2) / SCALE + PIER_DEPTH_M;
+  const wy = pierTopY - 1.0;
+  const total = Math.ceil(canvas.width / plankPxW) + 1;
+  for (let n = 3; n < total; n += 4) {
+    const wx = ((n + 0.5) * plankPxW - canvas.width / 2) / SCALE;
+    const [cx, cy] = worldToCanvas(wx, wy);
+    drawCleat(cx, cy, STATIC_CLEAT);
+  }
+}
+
+function drawBuoyCleats(): void {
+  const plankPxW = PLANK_W_M * SCALE;
+  const pierTopY = -(canvas.height / 2) / SCALE + PIER_DEPTH_M;
+  const wy = pierTopY + BUOY_DIST_M;
+  const total = Math.ceil(canvas.width / plankPxW) + 1;
+  for (let n = 3; n < total; n += 8) { // every 2nd pier cleat
+    const wx = ((n + 0.5) * plankPxW - canvas.width / 2) / SCALE;
+    const [cx, cy] = worldToCanvas(wx, wy);
+    drawCleat(cx, cy, STATIC_CLEAT);
+  }
+}
+
 function drawBoat(boat: Boat, isActive: boolean): void {
   const img = boatImages[boat.type];
   if (!img.complete || img.naturalWidth === 0) return;
 
   const { w, h } = BOAT_SIZE[boat.type];
   const [cx, cy] = worldToCanvas(boat.x, boat.y);
+  const meta   = OUTLINE_PATHS[boat.type];
+  const scaleX = (w * SCALE) / meta.svgW;
+  const scaleY = (h * SCALE) / meta.svgH;
 
   ctx.save();
   ctx.translate(cx, cy);
   ctx.rotate(boat.heading);
   ctx.drawImage(img, -(w * SCALE) / 2, -(h * SCALE) / 2, w * SCALE, h * SCALE);
 
+  for (const [sx, sy] of CLEAT_SVG[boat.type]) {
+    drawCleat(
+      (sx + meta.tx) * scaleX - (w * SCALE) / 2,
+      (meta.ty - sy) * scaleY - (h * SCALE) / 2,
+      MOVING_CLEAT,
+    );
+  }
+
   if (isActive) {
-    const meta = OUTLINE_PATHS[boat.type];
-    const scaleX = (w * SCALE) / meta.svgW;
-    const scaleY = (h * SCALE) / meta.svgH;
     ctx.save();
     ctx.transform(
       scaleX, 0, 0, -scaleY,
@@ -328,6 +400,8 @@ function render(): void {
 
   drawWater();
   drawPier();
+  drawPierCleats();
+  drawBuoyCleats();
   boats.forEach((boat, i) => drawBoat(boat, i === activeBoatIdx));
   requestAnimationFrame(render);
 }

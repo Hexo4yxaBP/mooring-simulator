@@ -16,7 +16,8 @@
       "Bash(rm -f src/physics/world.ts src/physics/forces.ts src/physics/integration.ts src/physics/mooring.ts src/physics/boat.ts src/rendering/renderer.ts src/state/scene.ts src/ui/mooring.ts src/persistence/storage.ts)",
       "Bash(rmdir src/physics src/rendering src/state src/ui src/persistence)",
       "Bash(npx tsc *)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(node -e \"const P=[[0,0],[-2.7799,16.2916],[-0.8692,29.7028],[5.8930,40]];function B\\(t,i\\){var p0=P[0][i],p1=P[1][i],p2=P[2][i],p3=P[3][i];return Math.pow\\(1-t,3\\)*p0+3*Math.pow\\(1-t,2\\)*t*p1+3*\\(1-t\\)*t*t*p2+t*t*t*p3;}var lo=0,hi=1,m;for\\(var i=0;i<60;i++\\){m=\\(lo+hi\\)/2;if\\(B\\(m,1\\)<18\\)lo=m;else hi=m;}console.log\\('t='+m.toFixed\\(6\\)+' By='+B\\(m,1\\).toFixed\\(6\\)+' Bx='+B\\(m,0\\).toFixed\\(4\\)+' stbd='+\\(11.786-B\\(m,0\\)\\).toFixed\\(4\\)\\);\")"
     ]
   }
 }
