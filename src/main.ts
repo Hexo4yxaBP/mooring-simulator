@@ -31,6 +31,12 @@ interface OBB {
   heading: number;
 }
 
+interface StaticCleat { wx: number; wy: number; kind: 'pier' | 'buoy'; }
+interface MooringLine  { from: CleatRef; to: CleatRef; }
+type CleatRef =
+  | { kind: 'static'; idx: number }
+  | { kind: 'moving'; boat: number; cleat: number };
+
 const boats: Boat[] = [];
 let activeBoatIdx: number | null = null;
 let dragBoatIdx: number | null = null;
@@ -39,6 +45,11 @@ let dragOffsetY = 0;
 let isRotating = false;
 let savedX = 0, savedY = 0, savedHeading = 0;
 let revertAnim: RevertAnim | null = null;
+
+let staticCleats: StaticCleat[] = [];
+const mooringLines: MooringLine[] = [];
+let pendingCleat: CleatRef | null = null;
+let cursorX = 0, cursorY = 0;
 
 const PIER_DEPTH_M = 5;   // pier depth in world-meters
 const PLANK_W_M    = 0.5; // each plank width in world-meters (≈ 1:10 aspect at 5m deep)
@@ -216,6 +227,7 @@ function resize(): void {
   const palette = document.getElementById('palette')!;
   canvas.width  = window.innerWidth  - palette.offsetWidth;
   canvas.height = window.innerHeight;
+  rebuildStaticCleats();
 }
 
 function worldToCanvas(wx: number, wy: number): [number, number] {
@@ -287,26 +299,75 @@ function drawCleat(cx: number, cy: number, stroke: string): void {
   ctx.stroke();
 }
 
-function drawPierCleats(): void {
+function rebuildStaticCleats(): void {
+  staticCleats = [];
   const plankPxW = PLANK_W_M * SCALE;
   const pierTopY = -(canvas.height / 2) / SCALE + PIER_DEPTH_M;
-  const wy = pierTopY - 1.0;
   const total = Math.ceil(canvas.width / plankPxW) + 1;
   for (let n = 3; n < total; n += 4) {
     const wx = ((n + 0.5) * plankPxW - canvas.width / 2) / SCALE;
-    const [cx, cy] = worldToCanvas(wx, wy);
-    drawCleat(cx, cy, STATIC_CLEAT);
+    staticCleats.push({ wx, wy: pierTopY - 1.0, kind: 'pier' });
+  }
+  for (let n = 3; n < total; n += 8) {
+    const wx = ((n + 0.5) * plankPxW - canvas.width / 2) / SCALE;
+    staticCleats.push({ wx, wy: pierTopY + BUOY_DIST_M, kind: 'buoy' });
   }
 }
 
-function drawBuoyCleats(): void {
-  const plankPxW = PLANK_W_M * SCALE;
-  const pierTopY = -(canvas.height / 2) / SCALE + PIER_DEPTH_M;
-  const wy = pierTopY + BUOY_DIST_M;
-  const total = Math.ceil(canvas.width / plankPxW) + 1;
-  for (let n = 3; n < total; n += 8) { // every 2nd pier cleat
-    const wx = ((n + 0.5) * plankPxW - canvas.width / 2) / SCALE;
-    const [cx, cy] = worldToCanvas(wx, wy);
+function getMovingCleatCanvas(boat: Boat, cleat: number): [number, number] {
+  const { w, h } = BOAT_SIZE[boat.type];
+  const meta = OUTLINE_PATHS[boat.type];
+  const scaleX = (w * SCALE) / meta.svgW;
+  const scaleY = (h * SCALE) / meta.svgH;
+  const [sx, sy] = CLEAT_SVG[boat.type][cleat];
+  const lx = (sx + meta.tx) * scaleX - (w * SCALE) / 2;
+  const ly = (meta.ty - sy) * scaleY - (h * SCALE) / 2;
+  const [bcx, bcy] = worldToCanvas(boat.x, boat.y);
+  const cos = Math.cos(boat.heading);
+  const sin = Math.sin(boat.heading);
+  return [bcx + lx * cos - ly * sin, bcy + lx * sin + ly * cos];
+}
+
+function getCleatCanvas(ref: CleatRef): [number, number] {
+  if (ref.kind === 'static') {
+    const sc = staticCleats[ref.idx];
+    return worldToCanvas(sc.wx, sc.wy);
+  }
+  return getMovingCleatCanvas(boats[ref.boat], ref.cleat);
+}
+
+function hitTestCleats(mx: number, my: number): CleatRef | null {
+  const R = CLEAT_R + 4;
+  for (let b = 0; b < boats.length; b++) {
+    for (let c = 0; c < CLEAT_SVG[boats[b].type].length; c++) {
+      const [cx, cy] = getMovingCleatCanvas(boats[b], c);
+      if ((mx - cx) ** 2 + (my - cy) ** 2 <= R * R) return { kind: 'moving', boat: b, cleat: c };
+    }
+  }
+  for (let i = 0; i < staticCleats.length; i++) {
+    const [cx, cy] = worldToCanvas(staticCleats[i].wx, staticCleats[i].wy);
+    if ((mx - cx) ** 2 + (my - cy) ** 2 <= R * R) return { kind: 'static', idx: i };
+  }
+  return null;
+}
+
+function cleatEq(a: CleatRef, b: CleatRef): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'static' && b.kind === 'static') return a.idx === b.idx;
+  if (a.kind === 'moving' && b.kind === 'moving') return a.boat === b.boat && a.cleat === b.cleat;
+  return false;
+}
+
+function canConnect(a: CleatRef, b: CleatRef): boolean {
+  if (cleatEq(a, b)) return false;
+  if (a.kind === 'static' && b.kind === 'static') return false;
+  if (a.kind === 'moving' && b.kind === 'moving' && a.boat === b.boat) return false;
+  return true;
+}
+
+function drawStaticCleats(): void {
+  for (let i = 0; i < staticCleats.length; i++) {
+    const [cx, cy] = worldToCanvas(staticCleats[i].wx, staticCleats[i].wy);
     drawCleat(cx, cy, STATIC_CLEAT);
   }
 }
@@ -367,6 +428,41 @@ function drawBoat(boat: Boat, isActive: boolean): void {
   ctx.fill();
 }
 
+function drawMooringLines(): void {
+  ctx.save();
+  ctx.lineWidth = 2;
+
+  ctx.strokeStyle = '#4A3728';
+  ctx.setLineDash([]);
+  for (const line of mooringLines) {
+    const [ax, ay] = getCleatCanvas(line.from);
+    const [bx, by] = getCleatCanvas(line.to);
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(bx, by);
+    ctx.stroke();
+  }
+
+  if (pendingCleat !== null) {
+    const [ax, ay] = getCleatCanvas(pendingCleat);
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = 'rgba(74, 55, 40, 0.6)';
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(cursorX, cursorY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.beginPath();
+    ctx.arc(ax, ay, CLEAT_R + 4, 0, Math.PI * 2);
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
 function endDrag(): void {
   const idx = dragBoatIdx;
   if (idx !== null && anyOverlap(idx)) {
@@ -400,9 +496,9 @@ function render(): void {
 
   drawWater();
   drawPier();
-  drawPierCleats();
-  drawBuoyCleats();
+  drawStaticCleats();
   boats.forEach((boat, i) => drawBoat(boat, i === activeBoatIdx));
+  drawMooringLines();
   requestAnimationFrame(render);
 }
 
@@ -420,6 +516,34 @@ canvas.addEventListener('mousedown', e => {
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
   const [wx, wy] = canvasToWorld(mx, my);
+
+  // Cleat interaction: takes priority over boat selection
+  const hitCleat = hitTestCleats(mx, my);
+  if (hitCleat !== null) {
+    if (pendingCleat === null) {
+      pendingCleat = hitCleat;
+    } else if (cleatEq(pendingCleat, hitCleat)) {
+      pendingCleat = null;
+    } else if (canConnect(pendingCleat, hitCleat)) {
+      const isDup = mooringLines.some(
+        l => (cleatEq(l.from, pendingCleat!) && cleatEq(l.to, hitCleat)) ||
+             (cleatEq(l.from, hitCleat) && cleatEq(l.to, pendingCleat!)),
+      );
+      if (!isDup) mooringLines.push({ from: pendingCleat, to: hitCleat });
+      pendingCleat = null;
+    } else {
+      pendingCleat = null;
+    }
+    e.preventDefault();
+    return;
+  }
+
+  // Clicking away from any cleat cancels a pending mooring line
+  if (pendingCleat !== null) {
+    pendingCleat = null;
+    e.preventDefault();
+    return;
+  }
 
   // Check bow/stern handles of the active boat first → rotation
   if (activeBoatIdx !== null) {
@@ -468,9 +592,11 @@ canvas.addEventListener('mousedown', e => {
 });
 
 canvas.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  cursorX = e.clientX - rect.left;
+  cursorY = e.clientY - rect.top;
   const idx = dragBoatIdx;
   if (idx === null) return;
-  const rect = canvas.getBoundingClientRect();
   if (isRotating) {
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
@@ -485,6 +611,27 @@ canvas.addEventListener('mousemove', e => {
 
 canvas.addEventListener('mouseup',    endDrag);
 canvas.addEventListener('mouseleave', endDrag);
+
+canvas.addEventListener('dblclick', e => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const THRESH = 6;
+  for (let i = mooringLines.length - 1; i >= 0; i--) {
+    const [ax, ay] = getCleatCanvas(mooringLines[i].from);
+    const [bx, by] = getCleatCanvas(mooringLines[i].to);
+    const dx = bx - ax, dy = by - ay;
+    const lenSq = dx * dx + dy * dy;
+    const t = lenSq > 0 ? Math.max(0, Math.min(1, ((mx - ax) * dx + (my - ay) * dy) / lenSq)) : 0;
+    const px = ax + t * dx - mx;
+    const py = ay + t * dy - my;
+    if (px * px + py * py <= THRESH * THRESH) {
+      mooringLines.splice(i, 1);
+      e.preventDefault();
+      return;
+    }
+  }
+});
 
 canvas.addEventListener('dragover', e => e.preventDefault());
 
