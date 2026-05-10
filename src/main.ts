@@ -54,6 +54,14 @@ const mooringLines: MooringLine[] = [];
 let pendingCleat: CleatRef | null = null;
 let cursorX = 0, cursorY = 0;
 
+let windAngle = Math.PI * 1.25; // radians, 0 = blowing toward north; default SW
+let windKt    = 10;
+let isDraggingWind = false;
+
+const WIND_CX = 70; // canvas px from left edge of canvas
+const WIND_CY = 70; // canvas px from top edge of canvas
+const WIND_R  = 40; // arrow length in px
+
 const PIER_DEPTH_M = 5;   // pier depth in world-meters
 const PLANK_W_M    = 0.5; // each plank width in world-meters (≈ 1:10 aspect at 5m deep)
 
@@ -486,7 +494,64 @@ function drawMooringLines(): void {
   ctx.restore();
 }
 
+function drawWindArrow(): void {
+  const sin = Math.sin(windAngle);
+  const cos = Math.cos(windAngle);
+  const tipX  =  WIND_CX + WIND_R * sin;
+  const tipY  =  WIND_CY - WIND_R * cos;
+  const tailX =  WIND_CX - WIND_R * 0.35 * sin;
+  const tailY =  WIND_CY + WIND_R * 0.35 * cos;
+
+  // Background circle
+  ctx.beginPath();
+  ctx.arc(WIND_CX, WIND_CY, WIND_R + 10, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(15, 28, 43, 0.75)';
+  ctx.fill();
+  ctx.strokeStyle = '#2d4a6b';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Shaft
+  ctx.beginPath();
+  ctx.moveTo(tailX, tailY);
+  ctx.lineTo(tipX, tipY);
+  ctx.strokeStyle = '#7ab5d4';
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+
+  // Arrowhead (filled triangle, tip at arrow tip)
+  ctx.save();
+  ctx.translate(tipX, tipY);
+  ctx.rotate(windAngle);
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(-7, 13);
+  ctx.lineTo( 7, 13);
+  ctx.closePath();
+  ctx.fillStyle = '#7ab5d4';
+  ctx.fill();
+  ctx.restore();
+
+  // Drag handle at tip
+  ctx.beginPath();
+  ctx.arc(tipX, tipY, 6, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(122, 181, 212, 0.25)';
+  ctx.strokeStyle = '#7ab5d4';
+  ctx.lineWidth = 1.5;
+  ctx.fill();
+  ctx.stroke();
+
+  // Wind speed label
+  ctx.save();
+  ctx.font = 'bold 12px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#7ab5d4';
+  ctx.fillText(`${windKt} kt`, WIND_CX, WIND_CY + WIND_R + 22);
+  ctx.restore();
+}
+
 function endDrag(): void {
+  isDraggingWind = false;
   const idx = dragBoatIdx;
   if (idx !== null && anyOverlap(idx)) {
     const target = findNearestValid(idx);
@@ -522,6 +587,7 @@ function render(): void {
   drawStaticCleats();
   boats.forEach((boat, i) => drawBoat(boat, i === activeBoatIdx));
   drawMooringLines();
+  drawWindArrow();
   requestAnimationFrame(render);
 }
 
@@ -539,6 +605,15 @@ canvas.addEventListener('mousedown', e => {
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
   const [wx, wy] = canvasToWorld(mx, my);
+
+  // Wind arrow tip drag
+  const wtx = WIND_CX + WIND_R * Math.sin(windAngle);
+  const wty = WIND_CY - WIND_R * Math.cos(windAngle);
+  if ((mx - wtx) ** 2 + (my - wty) ** 2 <= 12 * 12) {
+    isDraggingWind = true;
+    e.preventDefault();
+    return;
+  }
 
   // Cleat interaction: takes priority over boat selection
   const hitCleat = hitTestCleats(mx, my);
@@ -622,6 +697,10 @@ canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
   cursorX = e.clientX - rect.left;
   cursorY = e.clientY - rect.top;
+  if (isDraggingWind) {
+    windAngle = Math.atan2(cursorX - WIND_CX, -(cursorY - WIND_CY));
+    return;
+  }
   const idx = dragBoatIdx;
   if (idx === null) return;
   if (isRotating) {
@@ -753,6 +832,12 @@ rudderPanel.addEventListener('dblclick', () => {
   rudderDeg.textContent = '0';
   rudderSlider.value = '0';
   updateRudderTrack();
+});
+
+const windKtInput = document.getElementById('wind-kt-input')! as HTMLInputElement;
+windKtInput.addEventListener('input', () => {
+  const v = parseInt(windKtInput.value, 10);
+  if (!isNaN(v)) windKt = Math.max(0, Math.min(99, v));
 });
 
 window.addEventListener('resize', resize);

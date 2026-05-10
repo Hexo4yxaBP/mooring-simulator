@@ -60,6 +60,48 @@
       font-size: 11px;
     }
 
+    .palette-section {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      border-top: 1px solid #2d4a6b;
+      padding-top: 14px;
+    }
+
+    .palette-section h3 {
+      color: #7ab5d4;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .wind-row {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      color: #7ab5d4;
+      font-size: 12px;
+    }
+
+    #wind-kt-input {
+      width: 46px;
+      background: #0f1c2b;
+      border: 1px solid #2d4a6b;
+      border-radius: 4px;
+      color: #7ab5d4;
+      font-size: 12px;
+      padding: 4px 6px;
+      text-align: right;
+      outline: none;
+    }
+
+    #wind-kt-input:focus {
+      border-color: #7ab5d4;
+    }
+
     canvas {
       flex: 1;
       display: block;
@@ -244,6 +286,13 @@
     <div class="boat-icon" draggable="true" data-type="catamaran">
       <img src="/boats/catamaran.svg" alt="Catamaran">
       <span>Catamaran</span>
+    </div>
+    <div class="palette-section">
+      <h3>Wind</h3>
+      <div class="wind-row">
+        <input id="wind-kt-input" type="number" min="0" max="99" step="1" value="10">
+        <span>kt</span>
+      </div>
     </div>
   </aside>
   <canvas id="canvas"></canvas>
