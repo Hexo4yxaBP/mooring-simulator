@@ -494,6 +494,87 @@ function drawMooringLines(): void {
   ctx.restore();
 }
 
+function getBinPos(): [number, number] {
+  return [canvas.width - 42, 52];
+}
+
+function drawBin(): void {
+  const [cx, cy] = getBinPos();
+  const hot = dragBoatIdx !== null;
+  const col = hot ? '#e05555' : '#4a6b8a';
+  const bg  = hot ? 'rgba(224,85,85,0.18)' : 'rgba(255,255,255,0.04)';
+
+  ctx.save();
+  ctx.strokeStyle = col;
+  ctx.fillStyle   = bg;
+  ctx.lineWidth   = 2;
+  ctx.lineJoin    = 'round';
+  ctx.lineCap     = 'round';
+
+  const bw = 22, bh = 26;
+
+  // Body
+  ctx.beginPath();
+  ctx.roundRect(cx - bw / 2, cy - bh / 2 + 7, bw, bh, 3);
+  ctx.fill();
+  ctx.stroke();
+
+  // Lid
+  ctx.beginPath();
+  ctx.roundRect(cx - bw / 2 - 3, cy - bh / 2 + 2, bw + 6, 6, 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // Handle
+  ctx.beginPath();
+  ctx.roundRect(cx - 5, cy - bh / 2 - 4, 10, 6, 2);
+  ctx.stroke();
+
+  // Slats inside body
+  ctx.lineWidth = 1.5;
+  for (let i = -1; i <= 1; i++) {
+    ctx.beginPath();
+    ctx.moveTo(cx + i * 7, cy - bh / 2 + 12);
+    ctx.lineTo(cx + i * 7, cy + bh / 2 + 3);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function deleteBoat(idx: number): void {
+  // Remove mooring lines connected to this boat
+  for (let i = mooringLines.length - 1; i >= 0; i--) {
+    const { from, to } = mooringLines[i];
+    if ((from.kind === 'moving' && from.boat === idx) ||
+        (to.kind  === 'moving' && to.boat   === idx)) {
+      mooringLines.splice(i, 1);
+    }
+  }
+  // Shift down boat indices in remaining mooring lines
+  for (const line of mooringLines) {
+    if (line.from.kind === 'moving' && line.from.boat > idx)
+      line.from = { kind: 'moving', boat: line.from.boat - 1, cleat: line.from.cleat };
+    if (line.to.kind === 'moving' && line.to.boat > idx)
+      line.to   = { kind: 'moving', boat: line.to.boat   - 1, cleat: line.to.cleat   };
+  }
+  // Fix pending cleat reference
+  if (pendingCleat !== null && pendingCleat.kind === 'moving') {
+    if (pendingCleat.boat === idx) pendingCleat = null;
+    else if (pendingCleat.boat > idx)
+      pendingCleat = { kind: 'moving', boat: pendingCleat.boat - 1, cleat: pendingCleat.cleat };
+  }
+  // Fix active boat index
+  if (activeBoatIdx === idx) {
+    activeBoatIdx = null;
+    syncRudderUI();
+    syncThrottleUI();
+  } else if (activeBoatIdx !== null && activeBoatIdx > idx) {
+    activeBoatIdx--;
+  }
+  boats.splice(idx, 1);
+}
+
 function drawWindArrow(): void {
   const sin = Math.sin(windAngle);
   const cos = Math.cos(windAngle);
@@ -553,6 +634,18 @@ function drawWindArrow(): void {
 function endDrag(): void {
   isDraggingWind = false;
   const idx = dragBoatIdx;
+
+  // Recycle bin drop — must clear dragBoatIdx first so drawBin stops highlighting
+  if (idx !== null) {
+    const [bx, by] = getBinPos();
+    if ((cursorX - bx) ** 2 + (cursorY - by) ** 2 <= 36 * 36) {
+      dragBoatIdx = null;
+      isRotating  = false;
+      deleteBoat(idx);
+      return;
+    }
+  }
+
   if (idx !== null && anyOverlap(idx)) {
     const target = findNearestValid(idx);
     revertAnim = {
@@ -587,6 +680,7 @@ function render(): void {
   drawStaticCleats();
   boats.forEach((boat, i) => drawBoat(boat, i === activeBoatIdx));
   drawMooringLines();
+  drawBin();
   drawWindArrow();
   requestAnimationFrame(render);
 }
