@@ -48,6 +48,12 @@
       background: #152333;
     }
 
+    .boat-icon.disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+
     .boat-icon img {
       width: 36px;
       height: 54px;
@@ -58,6 +64,34 @@
     .boat-icon span {
       color: #7ab5d4;
       font-size: 11px;
+    }
+
+    #play-btn {
+      width: 100%;
+      padding: 9px 0;
+      border-radius: 6px;
+      font-size: 20px;
+      font-weight: bold;
+      cursor: pointer;
+      transition: opacity 0.15s;
+      user-select: none;
+    }
+
+    #play-btn.is-play {
+      background: #0d2b14;
+      color: #5cb85c;
+      border: 1px solid #3a8a3a;
+    }
+
+    #play-btn.is-stop {
+      background: #2b0d0d;
+      color: #e05555;
+      border: 1px solid #8a3a3a;
+    }
+
+    #play-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
     }
 
     .palette-section {
@@ -278,6 +312,7 @@
 </head>
 <body>
   <aside id="palette">
+    <button id="play-btn" class="is-play" disabled title="Select a boat to enable Play mode">▶</button>
     <h3>Boats</h3>
     <div class="boat-icon" draggable="true" data-type="monohull">
       <img src="/boats/monohull.svg" alt="Monohull">

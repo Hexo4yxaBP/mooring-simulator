@@ -58,6 +58,9 @@ let windAngle = Math.PI * 1.25; // radians, 0 = blowing toward north; default SW
 let windKt    = 10;
 let isDraggingWind = false;
 
+type GameMode = 'setup' | 'play';
+let gameMode: GameMode = 'setup';
+
 const WIND_CX = 70; // canvas px from left edge of canvas
 const WIND_CY = 70; // canvas px from top edge of canvas
 const WIND_R  = 40; // arrow length in px
@@ -438,16 +441,18 @@ function drawBoat(boat: Boat, isActive: boolean): void {
     for (const p of meta.paths) ctx.stroke(p);
     ctx.restore();
 
-    // Bow and stern rotation handles
-    const hw = (h * SCALE) / 2;
-    ctx.strokeStyle = '#FFD700';
-    ctx.fillStyle = 'rgba(255, 215, 0, 0.3)';
-    ctx.lineWidth = 2;
-    for (const hy of [-hw, hw]) {
-      ctx.beginPath();
-      ctx.arc(0, hy, 8, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
+    // Bow and stern rotation handles (setup mode only)
+    if (gameMode === 'setup') {
+      const hw = (h * SCALE) / 2;
+      ctx.strokeStyle = '#FFD700';
+      ctx.fillStyle = 'rgba(255, 215, 0, 0.3)';
+      ctx.lineWidth = 2;
+      for (const hy of [-hw, hw]) {
+        ctx.beginPath();
+        ctx.arc(0, hy, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
     }
   }
 
@@ -567,8 +572,7 @@ function deleteBoat(idx: number): void {
   // Fix active boat index
   if (activeBoatIdx === idx) {
     activeBoatIdx = null;
-    syncRudderUI();
-    syncThrottleUI();
+    syncControlPanels();
   } else if (activeBoatIdx !== null && activeBoatIdx > idx) {
     activeBoatIdx--;
   }
@@ -613,14 +617,16 @@ function drawWindArrow(): void {
   ctx.fill();
   ctx.restore();
 
-  // Drag handle at tip
-  ctx.beginPath();
-  ctx.arc(tipX, tipY, 6, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(122, 181, 212, 0.25)';
-  ctx.strokeStyle = '#7ab5d4';
-  ctx.lineWidth = 1.5;
-  ctx.fill();
-  ctx.stroke();
+  // Drag handle at tip (setup mode only)
+  if (gameMode === 'setup') {
+    ctx.beginPath();
+    ctx.arc(tipX, tipY, 6, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(122, 181, 212, 0.25)';
+    ctx.strokeStyle = '#7ab5d4';
+    ctx.lineWidth = 1.5;
+    ctx.fill();
+    ctx.stroke();
+  }
 
   // Wind speed label
   ctx.save();
@@ -689,6 +695,7 @@ let dragType: BoatType | null = null;
 
 document.querySelectorAll<HTMLElement>('.boat-icon').forEach(el => {
   el.addEventListener('dragstart', () => {
+    if (gameMode === 'play') return;
     dragType = el.dataset['type'] as BoatType;
   });
 });
@@ -700,13 +707,15 @@ canvas.addEventListener('mousedown', e => {
   const my = e.clientY - rect.top;
   const [wx, wy] = canvasToWorld(mx, my);
 
-  // Wind arrow tip drag
-  const wtx = WIND_CX + WIND_R * Math.sin(windAngle);
-  const wty = WIND_CY - WIND_R * Math.cos(windAngle);
-  if ((mx - wtx) ** 2 + (my - wty) ** 2 <= 12 * 12) {
-    isDraggingWind = true;
-    e.preventDefault();
-    return;
+  // Wind arrow tip drag (setup only)
+  if (gameMode === 'setup') {
+    const wtx = WIND_CX + WIND_R * Math.sin(windAngle);
+    const wty = WIND_CY - WIND_R * Math.cos(windAngle);
+    if ((mx - wtx) ** 2 + (my - wty) ** 2 <= 12 * 12) {
+      isDraggingWind = true;
+      e.preventDefault();
+      return;
+    }
   }
 
   // Cleat interaction: takes priority over boat selection
@@ -736,6 +745,9 @@ canvas.addEventListener('mousedown', e => {
     e.preventDefault();
     return;
   }
+
+  // Everything below is setup-only
+  if (gameMode === 'play') return;
 
   // Check bow/stern handles of the active boat first → rotation
   if (activeBoatIdx !== null) {
@@ -777,14 +789,12 @@ canvas.addEventListener('mousedown', e => {
       dragBoatIdx   = i;
       dragOffsetX   = wx - x;
       dragOffsetY   = wy - y;
-      syncRudderUI();
-      syncThrottleUI();
+      syncControlPanels();
       e.preventDefault();
       return;
     }
   }
-  syncRudderUI();
-  syncThrottleUI();
+  syncControlPanels();
 });
 
 canvas.addEventListener('mousemove', e => {
@@ -837,7 +847,7 @@ canvas.addEventListener('dragover', e => e.preventDefault());
 
 canvas.addEventListener('drop', e => {
   e.preventDefault();
-  if (!dragType) return;
+  if (!dragType || gameMode === 'play') return;
   const rect = canvas.getBoundingClientRect();
   const [wx, wy] = canvasToWorld(e.clientX - rect.left, e.clientY - rect.top);
   boats.push({ type: dragType, x: wx, y: wy, heading: 0, rudderAngle: 0, throttlePort: 2, throttleStbd: 2 });
@@ -865,7 +875,7 @@ function updateThrottleTrack(slider: HTMLInputElement): void {
 }
 
 function syncThrottleUI(): void {
-  if (activeBoatIdx === null) {
+  if (activeBoatIdx === null || gameMode !== 'play') {
     throttlePanel.style.display = 'none';
     return;
   }
@@ -902,7 +912,7 @@ function updateRudderTrack(): void {
 }
 
 function syncRudderUI(): void {
-  if (activeBoatIdx === null) {
+  if (activeBoatIdx === null || gameMode !== 'play') {
     rudderPanel.style.display = 'none';
     return;
   }
@@ -932,6 +942,38 @@ const windKtInput = document.getElementById('wind-kt-input')! as HTMLInputElemen
 windKtInput.addEventListener('input', () => {
   const v = parseInt(windKtInput.value, 10);
   if (!isNaN(v)) windKt = Math.max(0, Math.min(99, v));
+});
+
+const playBtn = document.getElementById('play-btn')! as HTMLButtonElement;
+
+function syncPlayBtn(): void {
+  if (gameMode === 'play') {
+    playBtn.textContent = '■';
+    playBtn.title       = 'Back to Setup';
+    playBtn.className   = 'is-stop';
+    playBtn.disabled    = false;
+  } else {
+    playBtn.textContent = '▶';
+    playBtn.title       = activeBoatIdx === null ? 'Select a boat to enable Play mode' : 'Enter Play mode';
+    playBtn.className   = 'is-play';
+    playBtn.disabled    = activeBoatIdx === null;
+  }
+  const isPlay = gameMode === 'play';
+  document.querySelectorAll<HTMLElement>('.boat-icon').forEach(el => {
+    el.classList.toggle('disabled', isPlay);
+  });
+}
+
+function syncControlPanels(): void {
+  syncRudderUI();
+  syncThrottleUI();
+  syncPlayBtn();
+}
+
+playBtn.addEventListener('click', () => {
+  gameMode = gameMode === 'setup' ? 'play' : 'setup';
+  windKtInput.disabled = gameMode === 'play';
+  syncControlPanels();
 });
 
 window.addEventListener('resize', resize);
