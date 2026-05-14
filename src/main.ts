@@ -92,7 +92,9 @@ const PROP_WALK_TABLE = [-1500, -500, 0, 250, 500];
 const C_DRAG_FWD  = 3000;   // N/(m/s) longitudinal drag
 const C_DRAG_LAT  = 80000;  // N/(m/s) lateral drag (~27× fwd — keel effect)
 const C_DRAG_ROT  = 50000;  // N·m/(rad/s) rotational drag
-const C_RUDDER    = 30000;  // N per (rad × m/s forward speed)
+const PROP_AFT_M   = 1.5;   // propeller m aft of boat centre (near keel exit)
+const RUDDER_AFT_M = 4.0;   // rudder post m aft of boat centre (~85% from bow on 10 m hull)
+const C_RUDDER    = 1400;   // N per (rad × m/s) — r≈15 m (1.5L) at full rudder
 const WIND_K_FWD  = 5;      // N/(m/s)² bow-on wind coefficient
 const WIND_K_LAT  = 27;     // N/(m/s)² beam-on wind coefficient
 const MOORING_K   = 50000;  // N/m spring constant
@@ -458,21 +460,33 @@ function drawBoat(boat: Boat, isActive: boolean): void {
     );
   }
 
-  // Rudder(s) — stern attachment derived from hull outline stern cleat positions
-  const sternSVG: Array<[number, number]> =
+  // Propeller(s) and rudder — positions match hull geometry
+  const rudderAftPx = RUDDER_AFT_M * SCALE;
+  // Monohull prop is near the keel exit; catamaran props are at the stern of each hull
+  const propPositions: Array<[number, number]> =
     boat.type === 'monohull'
-      ? [[(CLEAT_SVG.monohull[0][0] + CLEAT_SVG.monohull[1][0]) / 2, 0] as [number, number]]
-      : [[CLEAT_SVG.catamaran[4][0], 0], [CLEAT_SVG.catamaran[5][0], 0]];
-  ctx.strokeStyle = '#000000';
-  ctx.lineWidth = 3;
-  for (const [sx, sy] of sternSVG) {
-    const rx = (sx + meta.tx) * scaleX - (w * SCALE) / 2;
-    const ry = (meta.ty - sy) * scaleY - (h * SCALE) / 2;
+      ? [[0, PROP_AFT_M * SCALE]]
+      : [[-2.04 * SCALE, (h / 2) * SCALE], [2.04 * SCALE, (h / 2) * SCALE]];
+
+  for (const [px, py] of propPositions) {
     ctx.beginPath();
-    ctx.moveTo(rx, ry);
+    ctx.arc(px, py, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#555555';
+    ctx.fill();
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  // Rudder blade — centreline, aft of propeller (monohull only)
+  if (boat.type === 'monohull') {
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, rudderAftPx);
     ctx.lineTo(
-      rx + RUDDER_LEN * Math.sin(boat.rudderAngle),
-      ry + RUDDER_LEN * Math.cos(boat.rudderAngle),
+      RUDDER_LEN * Math.sin(boat.rudderAngle),
+      rudderAftPx + RUDDER_LEN * Math.cos(boat.rudderAngle),
     );
     ctx.stroke();
   }
@@ -714,96 +728,72 @@ function endDrag(): void {
   isRotating  = false;
 }
 
+// Speed-dependent turn rate model.
+// Returns deg/s for the given forward speed (knots) and normalised rudder input (−1..+1).
+// Low-speed: turn rate rises from zero (boat must be moving to turn).
+// High-speed: rate falls off (high-speed turns are wider).
+function getTurnRate(speedKnots: number, rudderInput: number): number {
+  const V           = Math.max(speedKnots, 0.01);
+  const baseRate    = 14.0;   // deg/s at optimal speed, full rudder
+  const V_opt       = 3.0;    // knots — peak turn efficiency
+  const lowDamping  = 1.8;
+  const highDamping = 0.022;
+  const lowEffect  = V / (V + lowDamping);
+  const highEffect = 1 / (1 + highDamping * (V - V_opt) ** 2);
+  return baseRate * lowEffect * highEffect * rudderInput;
+}
+
 function physicsStep(dt: number): void {
   if (activeBoatIdx === null) return;
   const boat = boats[activeBoatIdx];
-  let vx    = boat.vx    ?? 0;
-  let vy    = boat.vy    ?? 0;
-  let omega = boat.omega ?? 0;
+  let vx = boat.vx ?? 0;
+  let vy = boat.vy ?? 0;
 
   const mass = BOAT_MASS[boat.type];
-  const I    = BOAT_I[boat.type];
 
-  // Bow and starboard unit vectors (matches OBB SAT axis convention)
   const bowX  = Math.sin(boat.heading), bowY  = Math.cos(boat.heading);
   const stbdX = Math.cos(boat.heading), stbdY = -Math.sin(boat.heading);
 
-  let fx = 0, fy = 0, torque = 0;
+  let fx = 0, fy = 0;
 
   // --- Hydrodynamic drag ---
   const vFwd = vx * bowX  + vy * bowY;
   const vLat = vx * stbdX + vy * stbdY;
   fx -= C_DRAG_FWD * vFwd * bowX  + C_DRAG_LAT * vLat * stbdX;
   fy -= C_DRAG_FWD * vFwd * bowY  + C_DRAG_LAT * vLat * stbdY;
-  torque -= C_DRAG_ROT * omega;
 
   // --- Engine thrust + propeller walk ---
-  const { h } = BOAT_SIZE[boat.type];
-  // Stern world-space offset from boat centre (-h/2 along bow axis)
-  const sternWx = -(h / 2) * bowX;
-  const sternWy = -(h / 2) * bowY;
-
   if (boat.type === 'monohull') {
-    const thrustN = THROTTLE_FORCE[boat.throttlePort];
-    fx += thrustN * bowX;
-    fy += thrustN * bowY;
-    // Propeller walk — lateral force at stern
+    fx += THROTTLE_FORCE[boat.throttlePort] * bowX;
+    fy += THROTTLE_FORCE[boat.throttlePort] * bowY;
     const pwN = PROP_WALK_TABLE[boat.throttlePort];
     fx += pwN * stbdX;
     fy += pwN * stbdY;
-    torque += sternWy * (pwN * stbdX) - sternWx * (pwN * stbdY);
   } else {
-    // Catamaran — lateral arm between centreline and each hull engine (m)
-    const lateralArm = 2.04;
-    const portSternWx  = sternWx - lateralArm * stbdX;
-    const portSternWy  = sternWy - lateralArm * stbdY;
-    const stbdSternWx  = sternWx + lateralArm * stbdX;
-    const stbdSternWy  = sternWy + lateralArm * stbdY;
-
-    const thrustP = THROTTLE_FORCE[boat.throttlePort]  / 2;
+    const thrustP = THROTTLE_FORCE[boat.throttlePort] / 2;
     const thrustS = THROTTLE_FORCE[boat.throttleStbd] / 2;
     fx += (thrustP + thrustS) * bowX;
     fy += (thrustP + thrustS) * bowY;
-    // Differential thrust torque (thrust along bow axis at offset stern positions)
-    torque += portSternWy * (thrustP * bowX) - portSternWx * (thrustP * bowY);
-    torque += stbdSternWy * (thrustS * bowX) - stbdSternWx * (thrustS * bowY);
-
-    // Contra-rotating propwalk: port right-handed (+table), stbd left-handed (-table)
     const pwP =  PROP_WALK_TABLE[boat.throttlePort];
     const pwS = -PROP_WALK_TABLE[boat.throttleStbd];
     fx += (pwP + pwS) * stbdX;
     fy += (pwP + pwS) * stbdY;
-    torque += portSternWy * (pwP * stbdX) - portSternWx * (pwP * stbdY);
-    torque += stbdSternWy * (pwS * stbdX) - stbdSternWx * (pwS * stbdY);
-  }
-
-  // --- Rudder force ---
-  if (Math.abs(vFwd) >= 0.05) {
-    // Hydrodynamic rudder reaction force is to port when rudder turned to stbd
-    const rudderF = C_RUDDER * boat.rudderAngle * vFwd;
-    fx -= rudderF * stbdX;
-    fy -= rudderF * stbdY;
-    torque += sternWx * (rudderF * stbdY) - sternWy * (rudderF * stbdX);
   }
 
   // --- Wind force (quadratic) ---
-  const wsMs = windKt * 0.51444;
-  // Wind blow-toward vector: windAngle 0 = blowing toward north
+  const wsMs   = windKt * 0.51444;
   const windVx = -wsMs * Math.sin(windAngle);
   const windVy = -wsMs * Math.cos(windAngle);
   const appFwd = windVx * bowX  + windVy * bowY;
   const appLat = windVx * stbdX + windVy * stbdY;
-  const wFwdF  = WIND_K_FWD * appFwd * Math.abs(appFwd);
-  const wLatF  = WIND_K_LAT * appLat * Math.abs(appLat);
-  fx += wFwdF * bowX + wLatF * stbdX;
-  fy += wFwdF * bowY + wLatF * stbdY;
+  fx += WIND_K_FWD * appFwd * Math.abs(appFwd) * bowX  + WIND_K_LAT * appLat * Math.abs(appLat) * stbdX;
+  fy += WIND_K_FWD * appFwd * Math.abs(appFwd) * bowY  + WIND_K_LAT * appLat * Math.abs(appLat) * stbdY;
 
   // --- Mooring line spring forces ---
   for (const line of mooringLines) {
     const fromIsActive = line.from.kind === 'moving' && line.from.boat === activeBoatIdx;
     const toIsActive   = line.to.kind   === 'moving' && line.to.boat   === activeBoatIdx;
     if (!fromIsActive && !toIsActive) continue;
-
     const movingEnd = fromIsActive ? line.from : line.to;
     const otherEnd  = fromIsActive ? line.to   : line.from;
     const [ax, ay] = getCleatWorld(movingEnd);
@@ -812,15 +802,11 @@ function physicsStep(dt: number): void {
     if (dist < 1e-6) continue;
     const ext = dist - line.naturalLength;
     if (ext <= 0) continue;
-
     const nx = (bx - ax) / dist, ny = (by - ay) / dist;
     const dext = vx * nx + vy * ny;
     const fMag = Math.max(0, MOORING_K * ext - MOORING_C * dext);
     fx += fMag * nx;
     fy += fMag * ny;
-    // Torque from line force applied at cleat position relative to boat centre
-    const rx = ax - boat.x, ry = ay - boat.y;
-    torque += ry * (fMag * nx) - rx * (fMag * ny);
   }
 
   // --- Collision penalty forces ---
@@ -834,20 +820,34 @@ function physicsStep(dt: number): void {
     if (mtv === null) continue;
     fx += COLLISION_K * mtv[0];
     fy += COLLISION_K * mtv[1];
-    // 50% position correction to prevent tunnelling
     boat.x += mtv[0] * 0.5;
     boat.y += mtv[1] * 0.5;
   }
 
-  // Semi-implicit Euler integration (velocity before position)
-  vx    += (fx / mass) * dt;
-  vy    += (fy / mass) * dt;
-  omega += (torque / I) * dt;
+  // --- Semi-implicit Euler: linear motion ---
+  vx += (fx / mass) * dt;
+  vy += (fy / mass) * dt;
   boat.vx = vx;
   boat.vy = vy;
-  boat.omega = omega;
   boat.x += vx * dt;
   boat.y += vy * dt;
+
+  // --- Yaw ---
+  let omega: number;
+  if (boat.type === 'catamaran') {
+    // Differential thrust is primary steering — integrate torque
+    omega = boat.omega ?? 0;
+    const thrustP    = THROTTLE_FORCE[boat.throttlePort] / 2;
+    const thrustS    = THROTTLE_FORCE[boat.throttleStbd] / 2;
+    const diffTorque = (thrustP - thrustS) * 2.04 - C_DRAG_ROT * omega;
+    omega += (diffTorque / BOAT_I.catamaran) * dt;
+  } else {
+    // Monohull: speed-dependent rudder rate model
+    const speedKnots = vFwd / 0.51444;
+    const rudderNorm = boat.rudderAngle / (35 * Math.PI / 180); // ±35° → ±1
+    omega = getTurnRate(speedKnots, rudderNorm) * (Math.PI / 180);
+  }
+  boat.omega   = omega;
   boat.heading += omega * dt;
 }
 
