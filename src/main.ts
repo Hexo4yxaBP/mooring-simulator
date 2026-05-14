@@ -97,8 +97,8 @@ const RUDDER_AFT_M = 4.0;   // rudder post m aft of boat centre (~85% from bow o
 const C_RUDDER    = 1400;   // N per (rad × m/s) — r≈15 m (1.5L) at full rudder
 const WIND_K_FWD  = 5;      // N/(m/s)² bow-on wind coefficient
 const WIND_K_LAT  = 27;     // N/(m/s)² beam-on wind coefficient
-const MOORING_K   = 50000;  // N/m spring constant
-const MOORING_C   = 10000;  // N·s/m damping coefficient
+const MOORING_K   = 500000;  // N/m spring constant
+const MOORING_C   = 200000;  // N·s/m damping coefficient
 const COLLISION_K = 150000; // N/m penalty spring constant
 
 function makeImage(src: string): HTMLImageElement {
@@ -175,11 +175,6 @@ const OUTLINE_PATHS: Record<BoatType, {
   },
 };
 
-function boatToOBB(boat: Boat): OBB {
-  const { w, h } = BOAT_SIZE[boat.type];
-  return { x: boat.x, y: boat.y, w, h, heading: boat.heading };
-}
-
 function getPierOBB(): OBB {
   const w = canvas.width / SCALE + 40;
   // Extend pier far below the screen so the bottom edge is never the closest exit;
@@ -189,49 +184,89 @@ function getPierOBB(): OBB {
   return { x: 0, y: pierTopY - h / 2, w, h, heading: 0 };
 }
 
-// SAT OBB test. Returns the minimum translation vector to push `a` out of `b`,
-// or null if the boxes do not intersect.
-function obbMTV(a: OBB, b: OBB): [number, number] | null {
-  const ahw = a.w / 2, ahh = a.h / 2;
-  const bhw = b.w / 2, bhh = b.h / 2;
+// Hull polygon vertices in local canvas space (pixels, Y-down, origin at boat centre).
+// Derived from CLEAT_SVG hull-outline points + bow tip, ordered clockwise on screen.
+const HULL_VERTS: Record<BoatType, Array<[number, number]>> = {
+  monohull: [
+    [-24.4,  99.3],  // port stern
+    [-28.9,   9.9],  // port midship
+    [ -9.5, -79.4],  // port bow shoulder
+    [  0.0, -99.3],  // bow tip
+    [  9.5, -79.4],  // stbd bow shoulder
+    [ 28.9,   9.9],  // stbd midship
+    [ 24.4,  99.3],  // stbd stern
+  ],
+  catamaran: [
+    [-58.1, 108.6],  // port stern
+    [-62.1,   0.0],  // port widest (midship)
+    [-40.7,-108.6],  // port bow
+    [ 40.7,-108.6],  // stbd bow
+    [ 62.2,   0.0],  // stbd widest
+    [ 58.1, 108.6],  // stbd stern
+  ],
+};
 
-  const ac = Math.cos(a.heading), asin = Math.sin(a.heading);
-  const bc = Math.cos(b.heading), bsin = Math.sin(b.heading);
-  const dx = b.x - a.x, dy = b.y - a.y;
+type Poly = Array<[number, number]>;
 
-  // World-space principal axes (bow-stern: (sin h, cos h), beam: (cos h, -sin h))
-  // because ctx.rotate maps canvas-local (0,-1) [bow] to world (sin h, cos h) after Y-flip.
-  const axes: Array<[number, number]> = [
-    [asin,  ac], [ ac, -asin],
-    [bsin,  bc], [ bc, -bsin],
+// Transform hull verts from local canvas space to world-space vertices.
+function boatToPoly(boat: Boat): Poly {
+  const cos = Math.cos(boat.heading), sin = Math.sin(boat.heading);
+  return HULL_VERTS[boat.type].map(([lx, ly]): [number, number] => {
+    const rlx = lx * cos - ly * sin;
+    const rly = lx * sin + ly * cos;
+    return [boat.x + rlx / SCALE, boat.y - rly / SCALE];
+  });
+}
+
+// Convert an axis-aligned or rotated OBB to four world-space vertices.
+function obbToPoly(obb: OBB): Poly {
+  const hw = obb.w / 2, hh = obb.h / 2;
+  const bx = Math.sin(obb.heading), by = Math.cos(obb.heading); // bow unit
+  const sx = Math.cos(obb.heading), sy = -Math.sin(obb.heading); // stbd unit
+  return [
+    [obb.x - sx * hw - bx * hh, obb.y - sy * hw - by * hh],
+    [obb.x - sx * hw + bx * hh, obb.y - sy * hw + by * hh],
+    [obb.x + sx * hw + bx * hh, obb.y + sy * hw + by * hh],
+    [obb.x + sx * hw - bx * hh, obb.y + sy * hw - by * hh],
   ];
+}
 
+// SAT convex-polygon test. Returns the MTV to push `a` out of `b`, or null.
+function polyMTV(a: Poly, b: Poly): [number, number] | null {
   let minOverlap = Infinity;
   let mtx = 0, mty = 0;
-
-  for (const [nx, ny] of axes) {
-    const dn  = dx * nx + dy * ny;
-    const eA  = ahh * Math.abs(asin * nx + ac   * ny) + ahw * Math.abs(ac   * nx - asin * ny);
-    const eB  = bhh * Math.abs(bsin * nx + bc   * ny) + bhw * Math.abs(bc   * nx - bsin * ny);
-    const ov  = eA + eB - Math.abs(dn);
-    if (ov <= 0) return null;
-    if (ov < minOverlap) {
-      minOverlap = ov;
-      const sign = dn >= 0 ? -1 : 1;
-      mtx = sign * ov * nx;
-      mty = sign * ov * ny;
+  for (const poly of [a, b]) {
+    for (let i = 0; i < poly.length; i++) {
+      const [x1, y1] = poly[i];
+      const [x2, y2] = poly[(i + 1) % poly.length];
+      let nx = -(y2 - y1), ny = x2 - x1;
+      const len = Math.sqrt(nx * nx + ny * ny);
+      if (len < 1e-10) continue;
+      nx /= len; ny /= len;
+      let minA = Infinity, maxA = -Infinity;
+      let minB = Infinity, maxB = -Infinity;
+      for (const [vx, vy] of a) { const p = vx * nx + vy * ny; if (p < minA) minA = p; if (p > maxA) maxA = p; }
+      for (const [vx, vy] of b) { const p = vx * nx + vy * ny; if (p < minB) minB = p; if (p > maxB) maxB = p; }
+      const ov = Math.min(maxA, maxB) - Math.max(minA, minB);
+      if (ov <= 0) return null;
+      if (ov < minOverlap) {
+        minOverlap = ov;
+        const sign = (minA + maxA) < (minB + maxB) ? -1 : 1;
+        mtx = sign * ov * nx;
+        mty = sign * ov * ny;
+      }
     }
   }
-
   return [mtx, mty];
 }
 
 function anyOverlap(idx: number): boolean {
-  const a = boatToOBB(boats[idx]);
+  const a = boatToPoly(boats[idx]);
+  const pierPoly = obbToPoly(getPierOBB());
   for (let i = 0; i < boats.length; i++) {
-    if (i !== idx && obbMTV(a, boatToOBB(boats[i])) !== null) return true;
+    if (i !== idx && polyMTV(a, boatToPoly(boats[i])) !== null) return true;
   }
-  return obbMTV(a, getPierOBB()) !== null;
+  return polyMTV(a, pierPoly) !== null;
 }
 
 // Iteratively push `boats[idx]` out of all obstacles (boats + pier) using MTV.
@@ -239,18 +274,26 @@ function anyOverlap(idx: number): boolean {
 function findNearestValid(idx: number): { x: number; y: number; heading: number } {
   let x = boats[idx].x;
   let y = boats[idx].y;
-  const { w, h } = BOAT_SIZE[boats[idx].type];
-  const heading = boats[idx].heading;
+  const { type, heading } = boats[idx];
 
-  const obstacles: OBB[] = [
-    ...boats.filter((_, i) => i !== idx).map(boatToOBB),
-    getPierOBB(),
+  // Rotated vertex offsets in world units — constant for fixed heading, reusable across iterations.
+  const cos = Math.cos(heading), sin = Math.sin(heading);
+  const offsets = HULL_VERTS[type].map(([lx, ly]): [number, number] => {
+    const rlx = lx * cos - ly * sin;
+    const rly = lx * sin + ly * cos;
+    return [rlx / SCALE, -rly / SCALE];
+  });
+
+  const obstacles: Poly[] = [
+    ...boats.filter((_, i) => i !== idx).map(boatToPoly),
+    obbToPoly(getPierOBB()),
   ];
 
   for (let iter = 0; iter < 20; iter++) {
     let moved = false;
+    const aPoly: Poly = offsets.map(([dx, dy]): [number, number] => [x + dx, y + dy]);
     for (const obs of obstacles) {
-      const mtv = obbMTV({ x, y, w, h, heading }, obs);
+      const mtv = polyMTV(aPoly, obs);
       if (mtv !== null) {
         x += mtv[0];
         y += mtv[1];
@@ -810,13 +853,13 @@ function physicsStep(dt: number): void {
   }
 
   // --- Collision penalty forces ---
-  const activeOBB = boatToOBB(boat);
-  const obstacles: OBB[] = [
-    ...boats.filter((_, i) => i !== activeBoatIdx).map(boatToOBB),
-    getPierOBB(),
+  const activePoly = boatToPoly(boat);
+  const colObstacles: Poly[] = [
+    ...boats.filter((_, i) => i !== activeBoatIdx).map(boatToPoly),
+    obbToPoly(getPierOBB()),
   ];
-  for (const obs of obstacles) {
-    const mtv = obbMTV(activeOBB, obs);
+  for (const obs of colObstacles) {
+    const mtv = polyMTV(activePoly, obs);
     if (mtv === null) continue;
     fx += COLLISION_K * mtv[0];
     fy += COLLISION_K * mtv[1];
