@@ -18,6 +18,9 @@ interface Boat {
   rudderAngle: number; // radians, +ve = starboard, range ±35°
   throttlePort: number; // 0=full astern … 2=neutral … 4=full ahead
   throttleStbd: number; // catamaran only; mirrors throttlePort for monohull (unused)
+  vx?: number;    // world-space m/s; initialised to 0 by physicsStep
+  vy?: number;    // world-space m/s
+  omega?: number; // angular velocity rad/s
 }
 
 interface RevertAnim {
@@ -35,7 +38,7 @@ interface OBB {
 }
 
 interface StaticCleat { wx: number; wy: number; kind: 'pier' | 'buoy'; }
-interface MooringLine  { from: CleatRef; to: CleatRef; }
+interface MooringLine  { from: CleatRef; to: CleatRef; naturalLength: number; }
 type CleatRef =
   | { kind: 'static'; idx: number }
   | { kind: 'moving'; boat: number; cleat: number };
@@ -53,6 +56,8 @@ let staticCleats: StaticCleat[] = [];
 const mooringLines: MooringLine[] = [];
 let pendingCleat: CleatRef | null = null;
 let cursorX = 0, cursorY = 0;
+
+let lastTime = 0;
 
 let windAngle = Math.PI * 1.25; // radians, 0 = blowing toward north; default SW
 let windKt    = 10;
@@ -75,6 +80,24 @@ const MOVING_CLEAT = '#22B14C';  // boat cleats
 const STATIC_CLEAT = '#ED1C24';  // pier / buoy cleats
 const BUOY_DIST_M  = 15;         // 1.5 × monohull 10 m
 const RUDDER_LEN   = 1.0 * SCALE; // visual rudder blade length in pixels
+
+// Physics constants
+const BOAT_MASS: Record<BoatType, number> = { monohull: 7000, catamaran: 12000 };
+// Moment of inertia — rectangular approximation (1/12)×m×(w²+h²)
+const BOAT_I: Record<BoatType, number>    = { monohull: 63600, catamaran: 163000 };
+// Thrust per throttle index (0=full astern … 4=full ahead), Newtons
+const THROTTLE_FORCE = [-10000, -4000, 0, 5000, 15000];
+// Starboard-positive lateral propwalk force at stern, Newtons (right-handed screw)
+const PROP_WALK_TABLE = [-1500, -500, 0, 250, 500];
+const C_DRAG_FWD  = 3000;   // N/(m/s) longitudinal drag
+const C_DRAG_LAT  = 80000;  // N/(m/s) lateral drag (~27× fwd — keel effect)
+const C_DRAG_ROT  = 50000;  // N·m/(rad/s) rotational drag
+const C_RUDDER    = 30000;  // N per (rad × m/s forward speed)
+const WIND_K_FWD  = 5;      // N/(m/s)² bow-on wind coefficient
+const WIND_K_LAT  = 27;     // N/(m/s)² beam-on wind coefficient
+const MOORING_K   = 50000;  // N/m spring constant
+const MOORING_C   = 10000;  // N·s/m damping coefficient
+const COLLISION_K = 150000; // N/m penalty spring constant
 
 function makeImage(src: string): HTMLImageElement {
   const img = new Image();
@@ -341,6 +364,31 @@ function getMovingCleatCanvas(boat: Boat, cleat: number): [number, number] {
   const cos = Math.cos(boat.heading);
   const sin = Math.sin(boat.heading);
   return [bcx + lx * cos - ly * sin, bcy + lx * sin + ly * cos];
+}
+
+function getCleatWorld(ref: CleatRef): [number, number] {
+  if (ref.kind === 'static') {
+    const sc = staticCleats[ref.idx];
+    return [sc.wx, sc.wy];
+  }
+  const boat = boats[ref.boat];
+  const { w, h } = BOAT_SIZE[boat.type];
+  const meta = OUTLINE_PATHS[boat.type];
+  const scaleX = (w * SCALE) / meta.svgW;
+  const scaleY = (h * SCALE) / meta.svgH;
+  const [sx, sy] = CLEAT_SVG[boat.type][ref.cleat];
+  const lx = (sx + meta.tx) * scaleX - (w * SCALE) / 2;
+  const ly = (meta.ty - sy) * scaleY - (h * SCALE) / 2;
+  const cos = Math.cos(boat.heading), sin = Math.sin(boat.heading);
+  const rlx = lx * cos - ly * sin;
+  const rly = lx * sin + ly * cos;
+  return [boat.x + rlx / SCALE, boat.y - rly / SCALE];
+}
+
+function computeNaturalLength(from: CleatRef, to: CleatRef): number {
+  const [ax, ay] = getCleatWorld(from);
+  const [bx, by] = getCleatWorld(to);
+  return Math.sqrt((bx - ax) ** 2 + (by - ay) ** 2);
 }
 
 function getCleatCanvas(ref: CleatRef): [number, number] {
@@ -666,7 +714,148 @@ function endDrag(): void {
   isRotating  = false;
 }
 
-function render(): void {
+function physicsStep(dt: number): void {
+  if (activeBoatIdx === null) return;
+  const boat = boats[activeBoatIdx];
+  let vx    = boat.vx    ?? 0;
+  let vy    = boat.vy    ?? 0;
+  let omega = boat.omega ?? 0;
+
+  const mass = BOAT_MASS[boat.type];
+  const I    = BOAT_I[boat.type];
+
+  // Bow and starboard unit vectors (matches OBB SAT axis convention)
+  const bowX  = Math.sin(boat.heading), bowY  = Math.cos(boat.heading);
+  const stbdX = Math.cos(boat.heading), stbdY = -Math.sin(boat.heading);
+
+  let fx = 0, fy = 0, torque = 0;
+
+  // --- Hydrodynamic drag ---
+  const vFwd = vx * bowX  + vy * bowY;
+  const vLat = vx * stbdX + vy * stbdY;
+  fx -= C_DRAG_FWD * vFwd * bowX  + C_DRAG_LAT * vLat * stbdX;
+  fy -= C_DRAG_FWD * vFwd * bowY  + C_DRAG_LAT * vLat * stbdY;
+  torque -= C_DRAG_ROT * omega;
+
+  // --- Engine thrust + propeller walk ---
+  const { h } = BOAT_SIZE[boat.type];
+  // Stern world-space offset from boat centre (-h/2 along bow axis)
+  const sternWx = -(h / 2) * bowX;
+  const sternWy = -(h / 2) * bowY;
+
+  if (boat.type === 'monohull') {
+    const thrustN = THROTTLE_FORCE[boat.throttlePort];
+    fx += thrustN * bowX;
+    fy += thrustN * bowY;
+    // Propeller walk — lateral force at stern
+    const pwN = PROP_WALK_TABLE[boat.throttlePort];
+    fx += pwN * stbdX;
+    fy += pwN * stbdY;
+    torque += sternWy * (pwN * stbdX) - sternWx * (pwN * stbdY);
+  } else {
+    // Catamaran — lateral arm between centreline and each hull engine (m)
+    const lateralArm = 2.04;
+    const portSternWx  = sternWx - lateralArm * stbdX;
+    const portSternWy  = sternWy - lateralArm * stbdY;
+    const stbdSternWx  = sternWx + lateralArm * stbdX;
+    const stbdSternWy  = sternWy + lateralArm * stbdY;
+
+    const thrustP = THROTTLE_FORCE[boat.throttlePort]  / 2;
+    const thrustS = THROTTLE_FORCE[boat.throttleStbd] / 2;
+    fx += (thrustP + thrustS) * bowX;
+    fy += (thrustP + thrustS) * bowY;
+    // Differential thrust torque (thrust along bow axis at offset stern positions)
+    torque += portSternWy * (thrustP * bowX) - portSternWx * (thrustP * bowY);
+    torque += stbdSternWy * (thrustS * bowX) - stbdSternWx * (thrustS * bowY);
+
+    // Contra-rotating propwalk: port right-handed (+table), stbd left-handed (-table)
+    const pwP =  PROP_WALK_TABLE[boat.throttlePort];
+    const pwS = -PROP_WALK_TABLE[boat.throttleStbd];
+    fx += (pwP + pwS) * stbdX;
+    fy += (pwP + pwS) * stbdY;
+    torque += portSternWy * (pwP * stbdX) - portSternWx * (pwP * stbdY);
+    torque += stbdSternWy * (pwS * stbdX) - stbdSternWx * (pwS * stbdY);
+  }
+
+  // --- Rudder force ---
+  if (Math.abs(vFwd) >= 0.05) {
+    // Hydrodynamic rudder reaction force is to port when rudder turned to stbd
+    const rudderF = C_RUDDER * boat.rudderAngle * vFwd;
+    fx -= rudderF * stbdX;
+    fy -= rudderF * stbdY;
+    torque += sternWx * (rudderF * stbdY) - sternWy * (rudderF * stbdX);
+  }
+
+  // --- Wind force (quadratic) ---
+  const wsMs = windKt * 0.51444;
+  // Wind blow-toward vector: windAngle 0 = blowing toward north
+  const windVx = -wsMs * Math.sin(windAngle);
+  const windVy = -wsMs * Math.cos(windAngle);
+  const appFwd = windVx * bowX  + windVy * bowY;
+  const appLat = windVx * stbdX + windVy * stbdY;
+  const wFwdF  = WIND_K_FWD * appFwd * Math.abs(appFwd);
+  const wLatF  = WIND_K_LAT * appLat * Math.abs(appLat);
+  fx += wFwdF * bowX + wLatF * stbdX;
+  fy += wFwdF * bowY + wLatF * stbdY;
+
+  // --- Mooring line spring forces ---
+  for (const line of mooringLines) {
+    const fromIsActive = line.from.kind === 'moving' && line.from.boat === activeBoatIdx;
+    const toIsActive   = line.to.kind   === 'moving' && line.to.boat   === activeBoatIdx;
+    if (!fromIsActive && !toIsActive) continue;
+
+    const movingEnd = fromIsActive ? line.from : line.to;
+    const otherEnd  = fromIsActive ? line.to   : line.from;
+    const [ax, ay] = getCleatWorld(movingEnd);
+    const [bx, by] = getCleatWorld(otherEnd);
+    const dist = Math.sqrt((bx - ax) ** 2 + (by - ay) ** 2);
+    if (dist < 1e-6) continue;
+    const ext = dist - line.naturalLength;
+    if (ext <= 0) continue;
+
+    const nx = (bx - ax) / dist, ny = (by - ay) / dist;
+    const dext = vx * nx + vy * ny;
+    const fMag = Math.max(0, MOORING_K * ext - MOORING_C * dext);
+    fx += fMag * nx;
+    fy += fMag * ny;
+    // Torque from line force applied at cleat position relative to boat centre
+    const rx = ax - boat.x, ry = ay - boat.y;
+    torque += ry * (fMag * nx) - rx * (fMag * ny);
+  }
+
+  // --- Collision penalty forces ---
+  const activeOBB = boatToOBB(boat);
+  const obstacles: OBB[] = [
+    ...boats.filter((_, i) => i !== activeBoatIdx).map(boatToOBB),
+    getPierOBB(),
+  ];
+  for (const obs of obstacles) {
+    const mtv = obbMTV(activeOBB, obs);
+    if (mtv === null) continue;
+    fx += COLLISION_K * mtv[0];
+    fy += COLLISION_K * mtv[1];
+    // 50% position correction to prevent tunnelling
+    boat.x += mtv[0] * 0.5;
+    boat.y += mtv[1] * 0.5;
+  }
+
+  // Semi-implicit Euler integration (velocity before position)
+  vx    += (fx / mass) * dt;
+  vy    += (fy / mass) * dt;
+  omega += (torque / I) * dt;
+  boat.vx = vx;
+  boat.vy = vy;
+  boat.omega = omega;
+  boat.x += vx * dt;
+  boat.y += vy * dt;
+  boat.heading += omega * dt;
+}
+
+function render(now: number): void {
+  const dt = Math.min((now - lastTime) / 1000, 0.1);
+  lastTime = now;
+  if (gameMode === 'play' && activeBoatIdx !== null) physicsStep(dt);
+
   // Advance revert animation (only when the boat is not being dragged)
   if (revertAnim !== null && revertAnim.idx !== dragBoatIdx) {
     const t    = Math.min((performance.now() - revertAnim.startTime) / revertAnim.duration, 1);
@@ -730,7 +919,7 @@ canvas.addEventListener('mousedown', e => {
         l => (cleatEq(l.from, pendingCleat!) && cleatEq(l.to, hitCleat)) ||
              (cleatEq(l.from, hitCleat) && cleatEq(l.to, pendingCleat!)),
       );
-      if (!isDup) mooringLines.push({ from: pendingCleat, to: hitCleat });
+      if (!isDup) mooringLines.push({ from: pendingCleat, to: hitCleat, naturalLength: computeNaturalLength(pendingCleat, hitCleat) });
       pendingCleat = null;
     } else {
       pendingCleat = null;
@@ -973,10 +1162,14 @@ function syncControlPanels(): void {
 playBtn.addEventListener('click', () => {
   gameMode = gameMode === 'setup' ? 'play' : 'setup';
   windKtInput.disabled = gameMode === 'play';
+  if (gameMode === 'play' && activeBoatIdx !== null) {
+    const b = boats[activeBoatIdx];
+    b.vx = 0; b.vy = 0; b.omega = 0;
+  }
   syncControlPanels();
 });
 
 window.addEventListener('resize', resize);
 
 resize();
-render();
+requestAnimationFrame(render);

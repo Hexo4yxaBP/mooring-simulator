@@ -1,213 +1,188 @@
-# Data Schemas and Normalization
+---
+updated: 2026-05-14
+supersedes: original data-schemas.md (was Go boundary transforms; actual codebase is TypeScript)
+---
 
-*This is an all-Go WASM application with no external API. "Normalization" here means transformations at package boundaries: raw input → semantic commands, physics state → render data, screen coordinates → world coordinates.*
-
-*Sources: domain-model.md (entity fields), interface-spec.md (types), architecture.md (D1/D2).*
+# Data Schemas — Physics State Extension
 
 ---
 
-## Boundary 1 — User Input → Commands
+## Boat State Extension
 
-Raw Ebiten input (pixel coordinates, key codes, mouse buttons) is mapped to typed game Commands.
+### New fields added to `Boat` interface
 
-### Screen Position → World Position
+| Field | Type | Default | Unit | Initialised by |
+|-------|------|---------|------|---------------|
+| `vx` | `number?` | 0 | m/s world-X | `physicsStep` on first call |
+| `vy` | `number?` | 0 | m/s world-Y | `physicsStep` on first call |
+| `omega` | `number?` | 0 | rad/s | `physicsStep` on first call |
 
-Used when user clicks to place a mooring line dock point (constraint C5) or selects a boat.
+`vx`, `vy` use the same Y-up world coordinate system as `boat.x`, `boat.y`.
+Source: gap G1 — `docs/Research/constraints.md`. Coordinate system — `docs/Research/interfaces.md`.
 
-```
-worldPos.X = screenX / viewport.Scale + viewport.OriginWorld.X
-worldPos.Y = (viewport.ScreenH - screenY) / viewport.Scale + viewport.OriginWorld.Y
-```
+### Existing fields unchanged
 
-Y-axis is flipped at this boundary (screen Y-down → world Y-up, decision D2).
-
-**Snap rule for dock attachment:** The raw world position from click is projected to the nearest point on the dock boundary polygon edge. This enforces that dock-end mooring points are always on the dock surface (constraint C5).
-
-```
-dockPoint = dock.NearestPointOnEdge(rawWorldPos)
-```
-
-**Snap rule for boat cleats:** User clicks within a `CleatHitRadius` (= 0.5 m world-space, ~10px at default scale) of a cleat dot. The closest cleat ID within radius is selected; clicks outside all radii are ignored (constraint C4).
-
-### Throttle State Encoding
-
-| User action | ThrottleState int | Label |
-|-------------|------------------|-------|
-| Key `4` / W from Full Fwd | 0 | Neutral |
-| Key `3` / W once from Neutral | 1 | Slow Forward |
-| Key `2` / W twice from Neutral | 2 | Full Forward |
-| Key `1` / S once from Neutral | 3 | Slow Astern |
-| Key `0` / S twice from Neutral | 4 | Full Astern |
-
-Throttle cycles up (W) and down (S); clamped at edges (no wrap).
-
-### Rudder Angle Encoding
-
-Raw: keyboard held A/D. Each tick adds/subtracts `RudderStepPerTick = 0.0349 rad (2°)`.  
-Clamped to `[-MaxRudderAngle, +MaxRudderAngle]` = `[-0.6109 rad, +0.6109 rad]` = `±35°`.  
-Positive = starboard turn (right), matching domain-model.md Boat.rudderAngle definition.
-
-### Wind Input
-
-Wind speed: mouse-wheel scroll on panel → ± 0.5 m/s per notch, clamped `[0, 30]` m/s.  
-Wind direction: click-drag on compass dial → angle in radians.  
-Both validated on input; no physics constants change.
+| Field | Unit | Notes |
+|-------|------|-------|
+| `x`, `y` | world m | mutated each frame by `physicsStep` |
+| `heading` | rad, 0=bow north | mutated each frame by `physicsStep` |
+| `rudderAngle` | rad, ±35° | read each frame; written only by rudder slider |
+| `throttlePort` | integer 0..4 | read each frame; written only by throttle slider |
+| `throttleStbd` | integer 0..4 | catamaran only; mirrors throttlePort for monohull (unused) |
 
 ---
 
-## Boundary 2 — Physics State → Render Data
+## MooringLine State Extension
 
-The renderer reads `sim.World` directly (no intermediate DTO). Transforms:
+### New field added to `MooringLine` interface
 
-### World Position → Screen Position
+| Field | Type | Unit | Initialised by |
+|-------|------|------|---------------|
+| `naturalLength` | `number` | world m | `mooringLines.push(...)` call |
 
-```
-screenX = (worldPos.X - viewport.OriginWorld.X) * viewport.Scale
-screenY = viewport.ScreenH - (worldPos.Y - viewport.OriginWorld.Y) * viewport.Scale
-```
+`naturalLength` = distance between the two cleats at the moment the line is connected.
+Computed by `computeNaturalLength(from, to)` inline at push time.
 
-### Heading → Draw Rotation
+This is a **required** field (not optional) — all `MooringLine` objects must carry it.
+There is only one push site in the codebase (`mousedown` handler, line ~733), so the migration is minimal.
 
-Ebiten `DrawImageOptions.GeoM.Rotate(angle)` uses clockwise positive.  
-Physics heading is CCW positive (math convention).  
-Transform: `ebitenAngle = -heading` (negate for screen-space CW convention).
-
-### Hull Polygon (world-space → screen-space)
-
-Monohull is approximated as an oriented rectangle with bow taper. Vertices in body frame:
-
-```
-// Body frame, CoM at origin, bow = +x direction
-halfLen  = HullLen / 2
-halfBeam = HullBeam / 2
-tapering = HullLen * 0.15  // bow taper offset
-
-vertices_body = [
-    {+halfLen - tapering, 0},         // bow tip (centerline)
-    {+halfLen * 0.6, +halfBeam},      // bow starboard shoulder
-    {-halfLen, +halfBeam * 0.8},      // stern starboard
-    {-halfLen, -halfBeam * 0.8},      // stern port
-    {+halfLen * 0.6, -halfBeam},      // bow port shoulder
-]
-```
-
-Transform to world-space: rotate by heading, translate by CoM world position.  
-Transform to screen-space: apply Viewport.WorldToScreen to each vertex.
-
-Catamaran hull: two rectangles (no taper), spaced `HullBeam * 0.6` apart, connected by a cross-beam rectangle. Same rotation/translation.
-
-### CoM Dot Position
-
-```
-comWorldPos = body.Position + rotate(body.ComOffset, body.Heading)
-```
-
-Drawn as filled circle, radius 4px, distinct color (white or red depending on boat active state).
-
-### Mooring Line Color by Tension
-
-| Tension / MaxTension | Color |
-|---------------------|-------|
-| 0 (slack) | `#888888` grey |
-| 0–0.3 | `#88CC88` green |
-| 0.3–0.7 | `#CCCC00` yellow |
-| 0.7–1.0 | `#CC4400` orange |
-| ≥ 1.0 (overstressed) | `#FF0000` red |
-
-`MaxTension` = `line.NaturalLength * line.Stiffness * 0.5` (50% extension = reference max for display scaling).
+Lines with `extension <= 0` (slack) produce zero force. Source: constraint P1 — `docs/Research/constraints.md`.
 
 ---
 
-## Boundary 3 — Simulation Constants (physics/constants.go)
+## Coordinate Transform at Physics Boundary
 
-All physics constants are tunable floats defined in one file. No SI lookup tables — values are chosen for gameplay feel.
+Physics forces are computed in **world space** (Y-up, meters). Rendering works in **canvas space** (Y-down, pixels). The boundary transform is:
 
-### Thrust Table (Monohull, Newtons)
+```
+canvas x  =  world x  ×  SCALE  +  canvas.width/2
+canvas y  = −world y  ×  SCALE  +  canvas.height/2
+```
 
-| ThrottleState | Value | Notes |
-|---------------|-------|-------|
-| Neutral | 0 | |
-| SlowForward | +800 | ~10% of full |
-| FullForward | +8000 | ~typical 30ft sailboat engine |
-| SlowAstern | -600 | Astern less efficient |
-| FullAstern | -5000 | |
+Inverse (canvas → world):
+```
+world x = (canvas x − canvas.width/2) / SCALE
+world y = (canvas.height/2 − canvas y) / SCALE
+```
 
-### Prop Walk Table (fractional multiplier on boat.PropWalk)
-
-| ThrottleState | Multiplier |
-|---------------|-----------|
-| Neutral | 0.0 |
-| SlowForward | 0.15 |
-| FullForward | 0.25 |
-| SlowAstern | 0.8 |
-| FullAstern | 1.0 |
-
-Constraint P4: astern multipliers >> forward multipliers.
-
-### Default Boat Parameters (Monohull)
-
-| Parameter | Value |
-|-----------|-------|
-| Mass | 5000 kg |
-| HullLen | 10 m |
-| HullBeam | 3 m |
-| MomentOfInertia | `mass * (len² + beam²) / 12` ≈ 44,750 kg·m² |
-| ComOffset | `{-0.5, 0}` m (slightly aft of center) |
-| Cleat Bow | `{+4.5, 0}` m (body frame) |
-| Cleat Midships | `{0, 0}` m |
-| Cleat Stern | `{-4.5, 0}` m |
-| PropWalk default | 300 N (right-handed prop = walks to port in astern) |
-
-### Default Boat Parameters (Catamaran, passive)
-
-| Parameter | Value |
-|-----------|-------|
-| Mass | 8000 kg |
-| HullLen | 12 m |
-| HullBeam | 6 m (overall) |
-| ComOffset | `{0, 0}` m (symmetric) |
-| PropWalk | 0 (MVP: no engine) |
-
-### Drag Coefficients (Monohull)
-
-| Coefficient | Value | Ratio |
-|-------------|-------|-------|
-| LongDrag (fwd/aft) | 300 N·s/m | 1× |
-| LatDrag (port/stbd) | 6000 N·s/m | 20× |
-| RotDrag | 50000 N·m·s/rad | — |
-
-Constraint P3: LatDrag/LongDrag ratio ≈ 20. Boats move easily forward, resist sideways motion.
-
-### Wind Drag Coefficients (Monohull)
-
-| Coefficient | Value |
-|-------------|-------|
-| LongWind | 15 m² (bow-on area) |
-| LatWind | 80 m² (beam-on area, includes sail) |
-
-### Mooring Line Defaults
-
-| Parameter | Value |
-|-----------|-------|
-| Stiffness | 5000 N/m |
-| Damping | 500 N·s/m |
-| NaturalLength | 0.95 × initial distance at placement |
-
-### Collision Penalty
-
-| Parameter | Value |
-|-----------|-------|
-| PenaltyStiffness | 100000 N/m |
+All physics force vectors remain in world space. No conversion to canvas space during physics.
+Source: `docs/Research/code-map.md` §Coordinate Transforms.
 
 ---
 
-## Dropped Fields / Intentional Omissions (MVP)
+## Force Vector Schema
 
-| Field | Reason for omission |
-|-------|-------------------|
-| Catamaran engine controls | MVP scope decision — catamaran is passive (constraints.md D4/confirmed decisions) |
-| Inextensible line mode | Requires constraint solver; deferred post-MVP |
-| Boat parameter editor | Fixed defaults for MVP (constraints.md U10) |
-| Audio | Not in spec; Ebiten audio deferred |
-| Save/load state | Not in spec |
-| Wind variation / gusts | Global constant wind only (constraints.md U11) |
+Forces within `physicsStep` are accumulated as `(fx: number, fy: number, torque: number)`.
+
+| Symbol | World X component | World Y component |
+|--------|------------------|------------------|
+| Bow unit vector | `sin(heading)` | `cos(heading)` |
+| Starboard unit vector | `cos(heading)` | `−sin(heading)` |
+
+Source: OBB SAT axes in `obbMTV()` (`docs/Research/code-map.md` §Collision).
+
+### Force application to torque
+
+```
+torque += (rx × fy) − (ry × fx)
+```
+where `(rx, ry)` = world-space vector from boat centre to point of application.
+This is the Z-component of the 2D cross product `r × F`.
+
+---
+
+## Throttle Integer → Thrust Newtons Mapping
+
+| Slider value | Meaning | `THROTTLE_FORCE[v]` |
+|---|---|---|
+| 0 | Full astern | −10000 N |
+| 1 | Slow astern | −4000 N |
+| 2 | Neutral | 0 N |
+| 3 | Slow ahead | +5000 N |
+| 4 | Full ahead | +15000 N |
+
+Source: `docs/Research/task-brief.md` §Throttle mapping.
+
+---
+
+## Propeller Walk — Lateral Force Mapping
+
+```
+// Starboard-positive lateral force on stern. Newtons.
+PROP_WALK_TABLE = [-1500, -500, 0, 250, 500]
+//                 ^astern            ahead^
+```
+
+| Boat type | Port engine lateral | Starboard engine lateral |
+|-----------|--------------------|-----------------------|
+| Monohull | `PROP_WALK_TABLE[throttlePort]` | — |
+| Catamaran | `+PROP_WALK_TABLE[throttlePort]` | `−PROP_WALK_TABLE[throttleStbd]` |
+
+Catamaran contra-rotation: when both throttles equal, net walk = 0.
+Applied at each hull's stern centerline — generates additional yaw torque.
+Source: constraint P4, P5 — `docs/Research/constraints.md`.
+
+---
+
+## Engine Application Points (Stern Positions)
+
+Applied force points are computed from `CLEAT_SVG` data at startup (or inline per frame):
+
+### Monohull
+
+Rudder/prop attachment = `(CLEAT_SVG.monohull[0][0] + CLEAT_SVG.monohull[1][0]) / 2` = x 5.893, y=0 in SVG space.
+
+Local canvas offset:
+- `lx = (5.893 + 1.364) × 4.134 − 30 ≈ 0 px` (centerline)
+- `ly = (40.142 − 0) × 4.964 − 100 ≈ 99.3 px`
+
+World offset from boat centre: `(0, −4.96)` m — stern, 5 m aft.
+
+### Catamaran
+
+Port engine at SVG `(3.520, 0)`, starboard at `(20.045, 0)`:
+
+| Engine | Local canvas (lx, ly) px | World offset (wx, wy) m |
+|--------|--------------------------|------------------------|
+| Port | (−40.7, 108.6) | (−2.04, −5.43) |
+| Starboard | (+40.7, 108.6) | (+2.04, −5.43) |
+
+Source: `docs/Research/code-map.md` §Catamaran Engine Application Points.
+
+For implementation efficiency, these offsets can be computed at runtime from existing helpers:
+```typescript
+const [cx, cy] = getMovingCleatCanvas(boat, /* port stern = cleat 0 */);
+// then convert to world via canvasToWorld or the formula above
+```
+Or pre-compute once using the same transform used in `getCleatWorld`.
+
+---
+
+## Drag Model
+
+Linear drag (F = C × v), computed in body frame then rotated to world:
+
+```typescript
+const vFwd = vx * bowX + vy * bowY;      // forward body-frame speed
+const vLat = vx * stbdX + vy * stbdY;   // starboard body-frame speed
+const dragFwd = C_DRAG_FWD * vFwd;       // opposes forward motion
+const dragLat = C_DRAG_LAT * vLat;       // opposes lateral motion
+// world-space drag force:
+fx -= dragFwd * bowX + dragLat * stbdX;
+fy -= dragFwd * bowY + dragLat * stbdY;
+torque -= C_DRAG_ROT * omega;
+```
+
+Applied at centre of mass (no torque contribution beyond rotational drag).
+
+---
+
+## Omitted in This Iteration
+
+| Feature | Reason |
+|---------|--------|
+| Inactive boat wind drift | User: "forces act only on the active boat" |
+| Inextensible mooring lines | Requires constraint solver — deferred |
+| Sail aerodynamics | Wind treated as bare-hull drag only |
+| Variable boat mass | Fixed per type; no UI for tuning in scope |
+| Wave effects | Not in task spec |

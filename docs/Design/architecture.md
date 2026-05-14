@@ -1,6 +1,11 @@
-# Architecture — Mooring Simulator
+---
+updated: 2026-05-14
+supersedes: original architecture.md (was Go/WASM multi-package; actual codebase is TypeScript single-file)
+---
 
-*Every decision references a fact from docs/Research/.*
+# Architecture — Physics Integration
+
+*Every decision references facts in `docs/Research/`.*
 
 ---
 
@@ -8,15 +13,14 @@
 
 | # | Decision | Rationale | Source |
 |---|----------|-----------|--------|
-| D1 | Physics world uses SI units (meters, kg, N, s) | Keeps force constants intuitive; scale to pixels via viewport transform | constraints.md U7 |
-| D2 | Coordinate system: Y-up in physics, Y-down in screen-space; transform at render boundary | Standard game pattern; physics formulas stay sign-consistent | domain-model.md "Coordinate System" |
-| D3 | Collision response: **penalty spring** | Boats move at <5 m/s — no tunneling risk; plugs directly into force accumulator pattern already defined; impulse-based adds constraint-solver complexity without benefit at this speed | domain-model.md "Contact/Collision Forces", constraints.md U6 |
-| D4 | Physics integrator: **semi-implicit Euler** | Stable for spring systems (mooring lines); simpler than RK4; standard for real-time games | constraints.md "What Can Be Decided Without Clarification" |
-| D5 | Simulation: **real-time continuous** | Ebiten's fixed-timestep `Update()` is the natural loop; no pause required by spec | tech-options.md "Option A — Ebiten" |
-| D6 | Mooring lines: **elastic spring only** for MVP | Hookean spring + damper already modeled; inextensible requires constraint solver — defer | domain-model.md "MooringLine", constraints.md U9 |
-| D7 | Boat parameters: **fixed defaults per type** for MVP | Reduces UI scope; tunable constants for feel, not naval accuracy | constraints.md U10, U3 |
-| D8 | All packages **pure Go, no CGO** | CGO incompatible with GOOS=js GOARCH=wasm | constraints.md T1 |
-| D9 | **No Ebiten dependency in physics or sim packages** | Keeps simulation logic testable outside browser; only render+ui+main depend on Ebiten | tech-options.md "Recommendation" |
+| D1 | Single-file addition — no new modules | The entire app is `src/main.ts`; creating separate modules requires Vite config changes and build wiring; physics is self-contained enough to live inline | `docs/Research/code-map.md` §Extension Points |
+| D2 | Variable `dt` from `requestAnimationFrame`, clamped to [0, 0.1 s] | rAF is the only loop; fixed-timestep accumulator adds complexity; at 60fps dt≈16 ms, at 30fps dt≈33 ms — both stable with linear drag and mooring spring constants chosen | `docs/Research/constraints.md` T1, T2 |
+| D3 | Semi-implicit Euler integration | Stable for spring systems at game-scale dt; simpler than RK4; standard for real-time simulators | `docs/Research/constraints.md` §What Can Be Decided |
+| D4 | Reuse OBB SAT (`obbMTV`) for collision response | Already correct, already tested; hull shape difference from true bezier polygon is minor at gameplay speeds; bezier polygon would add 200+ lines of sampling code | `docs/Research/constraints.md` T5; constraints.md §What Can Be Decided (hull collision fork) |
+| D5 | Penalty spring collision (not impulse) | Fits the force accumulator pattern already designed; no constraint solver needed; `COLLISION_K` is large enough to prevent visible penetration at dt≤0.1 s | original architecture.md D3 |
+| D6 | Active-boat-only physics | User requirement; inactive boats remain static (no wind drift) | `docs/Research/task-brief.md` §Facts Q2 answer |
+| D7 | Linear drag model (F = C×v, not C×v²) | Simpler, numerically stable, easy to tune; quadratic drag is more realistic but makes spring stability harder to reason about | `docs/Research/constraints.md` §What Can Be Decided |
+| D8 | Natural length = distance at attachment | Rope is taut at placement; no pre-tension; slack when boat drifts toward static end | domain-model.md §MooringLine |
 
 ---
 
@@ -24,193 +28,210 @@
 
 ```mermaid
 graph TB
-    User["User (Browser)"]
-    App["Mooring Simulator\n(WASM binary, Ebiten)"]
-    Browser["Browser Canvas API\n(via Ebiten abstraction)"]
-    FS["Static File Server\n(any HTTP server)"]
+    User["User (Browser Tab)"]
+    App["Mooring Simulator\n(TypeScript + Canvas 2D)\nsrc/main.ts"]
+    Canvas["HTML5 Canvas API\n(browser built-in)"]
+    Assets["Static Assets\n/boats/*.svg  /pier/*.svg"]
 
-    FS -->|"Serves index.html\nwasm_exec.js\nmain.wasm"| User
-    User -->|"Keyboard / Mouse input"| App
-    App -->|"Canvas draw calls"| Browser
-    Browser -->|"Rendered frame"| User
+    User -->|"Mouse / Keyboard"| App
+    App -->|"2D draw calls"| Canvas
+    Canvas -->|"Rendered frame"| User
+    App -->|"Image.src"| Assets
 ```
 
-No external APIs, no network calls after initial load. The WASM binary is fully self-contained.
+No network calls after page load. No server, no external APIs.
 
 ---
 
-## C4 Container Diagram
+## C4 Container Diagram (within `src/main.ts`)
 
 ```mermaid
 graph TB
-    subgraph WASM["WASM Binary"]
-        Main["main.go\nebiten.Game impl\n(Update / Draw / Layout)"]
-        Input["internal/input\nKey+mouse → Commands"]
-        Sim["internal/sim\nWorld · Boat · Dock · MooringLine"]
-        Physics["internal/physics\nVec2 · RigidBody · Integrator\nForce calculators · Collision"]
-        Render["internal/render\nViewport transform\nEbiten draw calls"]
-        UI["internal/ui\nOn-canvas HUD + panels"]
+    subgraph main_ts["src/main.ts — single module"]
+        State["State\nboats · mooringLines\nwindAngle · windKt\ngameMode · activeBoatIdx"]
+
+        PhysicsConst["Physics Constants\nBOAT_MASS · BOAT_I\nTHROTTLE_FORCE · PROP_WALK_TABLE\nC_DRAG_* · C_RUDDER\nWIND_K_* · MOORING_K/C\nCOLLISION_K"]
+
+        Helpers["Coordinate Helpers\nworldToCanvas · canvasToWorld\ngetCleatCanvas · getCleatWorld (new)\ngetMovingCleatCanvas"]
+
+        Physics["Physics Step\nphysicsStep(dt)\n— drag · thrust · propwalk\n— rudder · wind · springs\n— collision · integrate"]
+
+        Collision["Existing Collision\nobbMTV · boatToOBB\ngetPierOBB · findNearestValid"]
+
+        Render["Render Loop\nrender()\n— advance revertAnim\n— physicsStep(dt) [play mode only]\n— drawWater · drawPier\n— drawBoat · drawMooringLines\n— drawBin · drawWindArrow"]
+
+        Input["Input Handlers\nmousedown · mousemove\nmouseup · dblclick · drop\nrudder/throttle sliders"]
+
+        UI["Control Panels\nsyncControlPanels\nplayBtn · rudderPanel\nthrottlePanel · windKtInput"]
     end
 
-    Main -->|"poll"| Input
-    Main -->|"Step(dt)"| Sim
-    Main -->|"Draw(screen)"| Render
-    Main -->|"DrawHUD(screen)"| UI
-
-    Input -->|"[]Command"| Main
-    Main -->|"apply commands"| Sim
-
-    Sim -->|"per-body force accumulation"| Physics
-    Physics -->|"updated RigidBody state"| Sim
-
-    Render -->|"reads"| Sim
-    UI -->|"reads + writes controls"| Sim
+    State --> Physics
+    PhysicsConst --> Physics
+    Helpers --> Physics
+    Collision --> Physics
+    Physics --> State
+    State --> Render
+    Input --> State
+    UI --> State
 ```
-
-**Dependency rule:** `physics` ← `sim` ← `main` → `render`, `input`, `ui`.  
-`physics` and `sim` must not import Ebiten.
 
 ---
 
-## Per-Tick Sequence Diagram
+## Per-Frame Sequence Diagram
 
 ```mermaid
 sequenceDiagram
-    participant Ebiten
-    participant Main
-    participant Input
-    participant Sim
-    participant Physics
-    participant Render
+    participant rAF as requestAnimationFrame
+    participant render
+    participant physics as physicsStep
+    participant collision as obbMTV
+    participant draw as draw* functions
 
-    Ebiten->>Main: Update() [60 Hz]
-    Main->>Input: Poll(ebitenInputState)
-    Input-->>Main: []Command
+    rAF->>render: render()
+    Note over render: compute dt = now − lastTime<br/>clamp dt to [0, 0.1]
 
-    Main->>Sim: ApplyCommands(cmds)
-    Note over Sim: Update active boat's Throttle,\nRudder, Wind from commands
-
-    Main->>Sim: Step(dt=1/60s)
-    loop each Boat
-        Sim->>Physics: AccumulateForces(boat, wind, lines, dock)
-        Note over Physics: Wind · Thrust · PropWalk\n· Rudder · Drag · LineSpring\n· CollisionPenalty
-        Physics-->>Sim: ForceAccumulator{F, Torque}
-        Sim->>Physics: Integrate(body, acc, dt)
-        Note over Physics: Semi-implicit Euler:\nv += (F/m)*dt\nω += (T/I)*dt\np += v*dt\nθ += ω*dt
-        Physics-->>Sim: updated RigidBody
+    alt gameMode === 'play' AND activeBoatIdx !== null
+        render->>physics: physicsStep(dt)
+        Note over physics: 1. init vx/vy/omega if absent<br/>2. compute bow/stbd vectors
+        physics->>physics: accumulate drag force
+        physics->>physics: accumulate thrust force
+        physics->>physics: accumulate prop walk force
+        physics->>physics: accumulate rudder force
+        physics->>physics: accumulate wind force
+        loop each MooringLine connected to active boat
+            physics->>physics: compute cleat world positions (getCleatWorld)<br/>spring force if line taut
+        end
+        loop each other OBB obstacle
+            physics->>collision: obbMTV(activeBoatOBB, obstacleOBB)
+            collision-->>physics: MTV or null
+            physics->>physics: apply penalty force + 50% position correction
+        end
+        physics->>physics: semi-implicit Euler integrate<br/>vx += fx/m*dt · x += vx*dt etc.
+        physics-->>render: (mutated boat state)
     end
 
-    Ebiten->>Main: Draw(screen)
-    Main->>Render: Draw(screen, worldSnapshot)
-    Note over Render: Water bg → Dock\n→ MooringLines (tension color)\n→ Boats (hull+CoM+cleats)\n→ Active boat highlight
-    Main->>UI: DrawHUD(screen, worldSnapshot)
+    render->>draw: drawWater, drawPier, drawStaticCleats
+    render->>draw: boats.forEach(drawBoat)
+    render->>draw: drawMooringLines
+    render->>draw: drawBin, drawWindArrow
+    render->>rAF: requestAnimationFrame(render)
 ```
 
 ---
 
-## Package Structure
+## Physics Force Diagram (per boat, per frame)
 
 ```
-mooring-simulator/
-├── main.go                  # ebiten.Game: Update/Draw/Layout, wires all packages
-├── go.mod                   # module: github.com/.../mooring-simulator
-├── go.sum
-├── index.html               # WASM loader (loads wasm_exec.js + main.wasm)
-├── wasm_exec.js             # Go WASM runtime shim (copy from GOROOT/misc/wasm)
-└── internal/
-    ├── physics/
-    │   ├── vec2.go          # Vec2 type + math helpers (rotate, dot, cross, normalize)
-    │   ├── body.go          # RigidBody struct + semi-implicit Euler Integrate()
-    │   ├── forces.go        # Stateless force funcs: Wind, Thrust, PropWalk, Rudder, Drag
-    │   ├── mooring.go       # SpringForce(line, cleatWorldPos, vel) → Vec2
-    │   └── collision.go     # SAT convex-polygon overlap + penalty spring response
-    ├── sim/
-    │   ├── types.go         # ThrottleState, CleatID, BoatType enums + constants
-    │   ├── boat.go          # Boat struct, cleat world-position helper, defaults
-    │   ├── dock.go          # Dock struct, straight-pier constructor, polygon accessor
-    │   ├── world.go         # World struct, Step(dt), ApplyCommand()
-    │   └── constants.go     # Tunable physics constants (thrustTable, dragCoeffs, etc.)
-    ├── render/
-    │   ├── viewport.go      # Viewport: world→screen transform, zoom, pan
-    │   ├── renderer.go      # Renderer.Draw(): orchestrates all draw calls
-    │   ├── boat.go          # drawBoat(): hull polygon, CoM dot, cleat dots
-    │   ├── dock.go          # drawDock(): filled grey polygon
-    │   └── lines.go         # drawLines(): line segments, color = tension level
-    ├── input/
-    │   ├── commands.go      # Command union type + typed payload structs
-    │   └── handler.go       # Handler.Poll(): Ebiten key/mouse → []Command
-    └── ui/
-        ├── hud.go           # HUD.Draw(): boat info, wind readout, throttle indicator
-        └── panels.go        # Control panels: wind setter, rudder slider, boat selector
+                          WIND
+                           ↓ (apparent wind angle)
+            ┌──────────────────────────────┐
+   DRAG ←── │    ACTIVE BOAT               │ ──→ DRAG
+            │    (fx, fy, torque)          │
+            │    x, y, heading             │
+            │    vx, vy, omega             │
+            └────────────┬─────────────────┘
+                         │
+               ┌─────────┼──────────┐
+               ↓         ↓          ↓
+           THRUST   PROP WALK    RUDDER
+          (stern)   (stern)      (stern)
+                         │
+               ┌─────────┴──────────┐
+               ↓                    ↓
+          MOORING LINES         COLLISION
+       (at each cleat)        (pier / boats)
+       spring+damper         penalty spring
 ```
+
+All forces sum into `(fx, fy, torque)` before integration.
+Application point of each force enters the torque calculation: `τ += rx × fy − ry × fx`.
 
 ---
 
-## Viewport Transform
+## Render Loop `dt` Tracking
 
-Physics world uses meters. Screen uses pixels.
+```typescript
+let lastTime = 0;
 
+function render(now: number): void {
+  const dt = Math.min((now - lastTime) / 1000, 0.1);  // seconds, clamped
+  lastTime = now;
+
+  if (gameMode === 'play' && activeBoatIdx !== null) {
+    physicsStep(dt);
+  }
+
+  // ... draw calls ...
+  requestAnimationFrame(render);
+}
 ```
-screenPos = (worldPos - viewOrigin) * pixelsPerMeter
-worldPos  = screenPos / pixelsPerMeter + viewOrigin
-```
 
-`pixelsPerMeter` default: **20 px/m** (a 12m boat = 240px — visible and detailed enough).
+`requestAnimationFrame` passes a `DOMHighResTimeStamp` in milliseconds. Converting to seconds
+and clamping to 0.1 s prevents the spiral-of-death when the tab is backgrounded (constraint T2).
 
-Y-axis flip at render boundary:
-```
-screenY = screenHeight - worldY * pixelsPerMeter
-```
-
-Mouse clicks transform back to world-space for mooring line placement (constraint C5).
+Source: `docs/Research/constraints.md` T1, T2.
 
 ---
 
-## Collision Detection Strategy
+## Play Mode Toggle Reset
 
-*Decision D3: penalty spring.*
+When transitioning from `'setup'` → `'play'`, active boat velocity is **not** reset.
+In setup mode, `vx/vy/omega` are absent (undefined) — `physicsStep` initialises to 0.
+On re-entry to play after a previous session, we zero velocities explicitly:
 
-**Boat ↔ Dock:**
-- Dock MVP = axis-aligned rectangle (4 vertices). Boat hull = oriented rectangle.
-- Use SAT (Separating Axis Theorem) to find penetration depth and normal.
-- Apply `F_collision = k_pen * depth * normal` to boat at the contact point → force + torque.
-- `k_pen` is a stiff spring constant (~10× mooring stiffness) to prevent visible penetration.
+```typescript
+// In playBtn click handler, when entering play:
+if (activeBoatIdx !== null) {
+  boats[activeBoatIdx].vx = 0;
+  boats[activeBoatIdx].vy = 0;
+  boats[activeBoatIdx].omega = 0;
+}
+```
 
-**Boat ↔ Boat:**
-- Same SAT approach between two oriented rectangles.
-- Affects both boats (equal and opposite forces).
-
-**Why convex polygons:** Boat hulls are approximated as rectangles (top-down schematic — constraint C3). SAT is exact for convex polygons and pure Go (constraint T1, T3).
-
----
-
-## Mooring Line Placement Interaction
-
-1. User clicks on dock edge → world-space point snapped to closest point on dock segment.
-2. User clicks on active boat cleat region → selects CleatID.
-3. MooringLine created with `NaturalLength = currentDistance * 0.95` (slight pre-tension).
-4. Line is removed by right-clicking it or via HUD button.
+This prevents phantom velocities from a previous play session carrying over.
 
 ---
 
-## Wind Model
+## Mooring Line Creation Change
 
-Global constant `WindField{Speed, Direction}`. Applied identically to all boats.  
-Windage area differs per boat type: catamaran has larger lateral area coefficient.  
-*(Constraint C7: wind is a required force. Constraint C10: both boat types must respond to wind.)*
+One call site must change from:
+```typescript
+mooringLines.push({ from: pendingCleat, to: hitCleat });
+```
+to:
+```typescript
+mooringLines.push({
+  from: pendingCleat,
+  to: hitCleat,
+  naturalLength: computeNaturalLength(pendingCleat, hitCleat),
+});
+```
+
+`computeNaturalLength` calls `getCleatWorld` for both endpoints and returns their distance.
+
+---
+
+## Collision Handling in Physics vs. Drag Validation
+
+The existing `obbMTV` / `findNearestValid` code is used during **drag-and-drop** to validate placement (setup mode only). Physics uses `obbMTV` for a different purpose — **force generation** in play mode. Both usages co-exist without interference because:
+
+- Setup drag: collision → teleport boat to nearest valid position.
+- Physics: collision → add penalty force (no teleport, soft wall).
+
+The two paths are mutually exclusive (`gameMode` gates them).
 
 ---
 
 ## MVP Scope Boundary
 
-| Feature | MVP | Post-MVP |
-|---------|-----|----------|
-| Monohull active boat (full physics) | ✓ | — |
-| Catamaran passive boat (wind + lines, no engine) | ✓ | — |
-| Catamaran twin-engine physics | — | ✓ |
-| Straight dock pier | ✓ | — |
-| Configurable dock shape | — | ✓ |
-| Elastic mooring springs | ✓ | — |
-| Inextensible mooring lines | — | ✓ |
-| Fixed boat parameters | ✓ | — |
-| User-configurable boat parameters | — | ✓ |
+| Feature | In scope | Deferred |
+|---------|---------|---------|
+| Monohull full physics (all 6 forces) | ✓ | — |
+| Catamaran physics (twin engines + prop walk) | ✓ | — |
+| Wind force on active boat | ✓ | — |
+| Wind / drift on inactive boats | — | post-MVP |
+| Mooring spring + damper | ✓ | — |
+| Inextensible (rigid) mooring lines | — | post-MVP |
+| Hull-accurate bezier polygon collision | — | post-MVP |
+| Boat–boat collision physics | ✓ (OBB) | hull-accurate |
+| Pier collision physics | ✓ (OBB pier) | — |

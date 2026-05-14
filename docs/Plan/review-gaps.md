@@ -1,6 +1,12 @@
+---
+updated: 2026-05-14
+supersedes: original review-gaps.md (was Go multi-package; actual codebase is TypeScript)
+---
+
 # Review: Implementation Gaps
 
-*Completeness check against docs/Design/architecture.md, interface-spec.md, and access-control.md.*
+*Completeness check against docs/Design/architecture.md, interface-spec.md, data-schemas.md,
+and access-control.md.*
 
 ---
 
@@ -8,118 +14,139 @@
 
 **None found.**
 
-Checklist against architecture.md package structure:
+Checklist against architecture.md §MVP Scope Boundary:
 
-| Component | Covered by tasks |
-|-----------|-----------------|
-| `internal/physics/vec2.go` | TASK-010 |
-| `internal/physics/body.go` | TASK-011, TASK-012 |
-| `internal/physics/forces.go` | TASK-013, TASK-014 |
-| `internal/physics/mooring.go` | TASK-015 |
-| `internal/physics/collision.go` | TASK-016 |
-| `internal/sim/types.go` | TASK-020 |
-| `internal/sim/constants.go` | TASK-021 |
-| `internal/sim/boat.go` | TASK-022 |
-| `internal/sim/dock.go` | TASK-023 |
-| `internal/sim/world.go` (lines) | TASK-024 |
-| `internal/sim/world.go` (Step) | TASK-025 |
-| `internal/sim/world.go` (AddLine/Remove) | TASK-026 |
-| `internal/sim/world.go` (SetActive) | TASK-027 |
-| `internal/input/commands.go` | TASK-030 |
-| `internal/input/handler.go` (keyboard) | TASK-031 |
-| `internal/input/handler.go` (mouse) | TASK-032, TASK-033 |
-| `internal/input/handler.go` (validation) | TASK-034 |
-| `internal/render/viewport.go` | TASK-040 |
-| `internal/render/dock.go` + background | TASK-041 |
-| `internal/render/lines.go` | TASK-042 |
-| `internal/render/boat.go` | TASK-043 |
-| `internal/render/renderer.go` (highlight/ghost) | TASK-044 |
-| `internal/ui/hud.go` | TASK-050 |
-| `internal/ui/panels.go` (wind) | TASK-051 |
-| `internal/ui/panels.go` (rudder) | TASK-052 |
-| `internal/ui/hud.go` (tension hover) | TASK-053 |
-| `main.go` | TASK-060, TASK-061 |
-| `index.html`, `wasm_exec.js`, `Makefile` | TASK-002, TASK-062 |
+| Component | Covered by task |
+|-----------|----------------|
+| Boat interface extension (vx/vy/omega) | TASK-001 |
+| MooringLine interface extension (naturalLength) | TASK-001 |
+| All physics constants block | TASK-001 |
+| `getCleatWorld()` helper | TASK-002 |
+| `computeNaturalLength()` helper | TASK-002 |
+| `mooringLines.push()` update | TASK-002 |
+| `dt` tracking in render loop | TASK-003 |
+| Velocity reset on play mode entry | TASK-003 |
+| `physicsStep()` skeleton + Euler integrator | TASK-010 |
+| Hydrodynamic drag | TASK-011 |
+| Engine thrust (mono + cat) | TASK-012 |
+| Propeller walk (mono + cat, contra-rotating) | TASK-012 |
+| Rudder force (zero-speed guard) | TASK-013 |
+| Wind force (quadratic) | TASK-014 |
+| Mooring line spring+damper (tension-only) | TASK-015 |
+| Collision penalty (OBB reuse, 50% correction) | TASK-016 |
+| TypeScript type check gate | TASK-020 |
+| Browser smoke tests (9 scenarios) | TASK-021 |
+| Physics constant tuning | TASK-022 |
 
 ---
 
 ## Tasks Without Tests
 
-| Task | Has explicit test? | Notes |
-|------|--------------------|-------|
-| TASK-001 | No — build artifact | Verified by `go build` |
-| TASK-002 | No — build artifact | Verified by `GOOS=js GOARCH=wasm go build` |
-| TASK-003 | No — visual artifact | Manual smoke test |
-| TASK-021 | No — constants only | Compilation verify only |
-| TASK-030 | No — type definitions only | Compilation verify only |
-| TASK-041..044 | No — render output | Manual visual verification |
-| TASK-050..053 | No — render output | Manual visual verification |
-| TASK-062 | No — deployment artifact | Manual browser test |
-| All others | **Yes** — unit or integration test defined | ✓ |
+All Group 0–1 tasks include behavioral test criteria in their acceptance criteria.
+Type-check (TASK-020) provides the automated verification gate.
 
-All logically testable units have explicit test tasks. Pure build/render artifacts are acknowledged as visual-only.
+| Task | Test type | Verification |
+|------|-----------|-------------|
+| TASK-001 | Compile-time | `npx tsc --noEmit` |
+| TASK-002 | Compile-time + consistency check | Type check + console assertion |
+| TASK-003 | Compile-time + observable | Type check + browser console |
+| TASK-010 | Behavioral | Console `boats[0].vx = 1` observation |
+| TASK-011 | Behavioral | Deceleration observable in browser |
+| TASK-012 | Behavioral | Acceleration + yaw observable |
+| TASK-013 | Behavioral | Turn at speed observable |
+| TASK-014 | Behavioral | Lateral drift observable |
+| TASK-015 | Behavioral | Line-hold observable |
+| TASK-016 | Behavioral | Pier wall observable |
+| TASK-020 | Automated | `tsc --noEmit` exit code 0 |
+| TASK-021 | Manual (9 smoke tests) | Checklist in implementation-tasks.md |
+| TASK-022 | Manual + stability | 5-minute run + constant review |
+
+No task is entirely untested. TASK-021 (manual smoke) is the acceptance gate for the entire feature.
 
 ---
 
 ## Cyclic Dependencies
 
-Dependency graph checked manually:
+Dependency graph is a DAG:
 
 ```
-physics (no deps)
-  ↑
-sim (depends on physics)
-  ↑
-input (depends on sim types)
-  ↑
-render (depends on physics for Vec2, sim for world state)
-  ↑
-ui (depends on sim for world state, input for Command types)
-  ↑
-main (depends on all above)
+TASK-001
+  ↓       ↓
+TASK-002  TASK-003
+           ↓
+         TASK-010 (physicsStep skeleton)
+           ↓
+    ┌──────┼──────┬──────┬──────────┐
+  TASK-011 TASK-012 TASK-013 TASK-014
+                                    TASK-015 (needs TASK-002)
+                                    TASK-016
+                                        ↓
+                                    TASK-020
+                                        ↓
+                                    TASK-021
+                                        ↓
+                                    TASK-022
 ```
 
-No cycles. Confirmed: `physics` ← `sim` ← `main`; `render` and `input` also point only toward `sim`/`physics`, not back from them.
-
-**One potential issue to watch:** `internal/input/handler.go` imports `internal/sim` (for `CleatID`, `ThrottleState`, `BoatType` in payloads) and also `internal/render` (for `Viewport.ScreenToWorld` in mouse coordinate transform). This creates `input → render → physics` chain — not a cycle, but the `input` package must not import from `render` if `render` imports `input`. **Mitigation:** Move `Viewport.ScreenToWorld` so it's accessible to `input` without importing `render` — either inline the transform in `input.Handler` (it's 4 lines) or expose a standalone `WorldToScreen/ScreenToWorld` in `internal/physics` or a separate `internal/viewport` package. Recommended: **inline the viewport math in `input.Handler`**; the Handler struct holds a `Scale` and `OriginWorld` directly, avoiding the cross-dependency entirely. No new task needed — addressed in TASK-032 acceptance criteria which says Handler receives Viewport parameters.
+No cycles. TASK-011..016 are all independent additions to the same force accumulator.
+TASK-015 has an additional dependency on TASK-002 (needs `getCleatWorld`).
 
 ---
 
 ## Security Requirements Without Tasks
 
-From access-control.md:
+From access-control.md §Option A (Natural Bounds via Physics Constants):
 
 | Requirement | Task |
 |-------------|------|
-| No unsafe pointer use | TASK-081 (grep check) |
-| No CGO | TASK-081 (grep check) |
-| No net/http in WASM binary | TASK-081 (build tag check) |
-| HTTPS recommendation (deploy-time, not Go code) | TASK-062 (README note) |
-| Input ranges validated before physics | TASK-034 (validation) + TASK-080 (audit) |
+| `dt` clamped to [0, 0.1] to prevent dt spike | TASK-003 |
+| Terminal velocity self-limited by drag constants | TASK-022 (tuning verifies bounds) |
+| `dist < 1e-6` guard in spring force (prevent div/0) | TASK-015 acceptance criterion |
+| `throttlePort/Stbd` index in [0,4] — existing slider enforces | Existing code (no new task) |
+| `rudderAngle` in [±35°] — existing slider enforces | Existing code (no new task) |
+| No new network calls, no localStorage, no DOM access beyond canvas | Implicit (no new APIs used) |
 
-All security requirements from access-control.md have corresponding tasks. No gaps.
+All security requirements from access-control.md are covered. No gaps.
 
 ---
 
 ## Blocked Tasks
 
-**No blocked tasks.** All design unknowns were resolved in Phase 2.
+**No blocked tasks.**
 
-Previously blocked unknowns (now resolved):
-- U1 (architecture) → WASM+Ebiten → unblocks all tasks
-- U3 (physics fidelity) → tunable constants → TASK-021 unblocked
-- U4 (catamaran) → passive MVP → TASK-022 unblocked
-- U5 (dock shape) → straight pier → TASK-023 unblocked
-- U6 (collision) → penalty spring → TASK-016/TASK-025 unblocked
-- U7 (units) → SI → TASK-021 unblocked
+All design unknowns were resolved in Phase 2:
+
+| Former unknown | Resolution | Unblocks |
+|----------------|-----------|---------|
+| Variable vs fixed timestep | Variable dt, clamped 0.1 s | TASK-003, TASK-010 |
+| Hull collision type | OBB SAT reuse | TASK-016 |
+| Mooring spring model | Hookean + linear damper | TASK-015 |
+| Physics accuracy level | Tunable gameplay constants | TASK-001, TASK-022 |
+| Catamaran engine model | Twin contra-rotating engines | TASK-012 |
+| Active-only physics scope | Active boat only | TASK-010 (early return) |
 
 ---
 
 ## Risk Flags (Not Blockers)
 
-| Risk | Mitigation | Task |
-|------|-----------|------|
-| SAT collision is the most complex single task (3-4h, custom algorithm) | Start with AABB (axis-aligned bounding box) as a v1; upgrade to OBB+SAT as v2 within TASK-016 | TASK-016 |
-| `input → render` potential import cycle | Inline viewport math in `Handler` struct | TASK-032, TASK-040 |
-| Ebiten on-canvas UI scope creep | MVP panels strictly defined; no new panels without a task | TASK-050..053 |
-| Physics constants require tuning (feel vs accuracy) | Constants are in one file (`constants.go`); iterative tuning is TASK-021 + TASK-075 feedback loop | TASK-021, TASK-075 |
+| Risk | Impact | Mitigation | Task |
+|------|--------|-----------|------|
+| Mooring spring `MOORING_K/MOORING_C` ratio causes oscillation | Visible jitter on mooring lines | TASK-022 tuning; increase C if needed | TASK-022 |
+| Catamaran lateral arm constant (2.04 m) is hard-coded | Wrong torque if SVG geometry changes | Inline comment with derivation formula; compute dynamically if SVG changes | TASK-012 |
+| `physicsStep` in one 983-line file adds 100–150 lines | `src/main.ts` becomes large (~1100 lines) | Acceptable for now; Vite module split is a separate refactor task | — |
+| Console assertions not repeatable | Behavioral tests require manual setup each time | Document in TASK-021 checklist; consider adding Vitest post-MVP | TASK-021 |
+
+---
+
+## Stale Documentation Warning
+
+The following files describe a Go/WASM architecture that was **never implemented**. They should
+not be referenced for implementation:
+
+- `AGENTS.md` — Go toolchain commands (updated in Phase 3)
+- `CLAUDE.md` — mentions "Go 1.24, Ebiten" (should be updated separately)
+- `docs/Research/tech-options.md` — Go option analysis
+- `docs/Design/access-control.md` (original) — superseded
+
+All `docs/Research/` and `docs/Design/` files have been updated to reflect the TypeScript
+codebase as of Phase 2 completion.

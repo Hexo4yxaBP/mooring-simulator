@@ -1,87 +1,108 @@
-# Access Control
+---
+updated: 2026-05-14
+context: Physics subsystem "access control" = physics value bounds control.
+         Traditional auth/session security is not applicable (client-side game, no server,
+         no user accounts — see original access-control.md §Security Context).
+---
 
-*This is a client-side WASM application with no server, no user accounts, and no persistent data store. Traditional authentication/authorization does not apply. This document evaluates the relevant security boundary options for the deployment model.*
+# Physics Bounds Control
 
-*Sources: constraints.md (C1 "must run in browser", U1 "RESOLVED: Ebiten → WASM, no server"), architecture.md (C4 Context: "No external APIs, no network calls after initial load").*
+*In a client-side single-player game there is no authentication boundary. The relevant "access
+control" question for a physics simulation is: what prevents unbounded growth of state values
+that would cause numerical instability, invisible boats, or browser hangs?*
 
 ---
 
-## Security Context
+## Option A — Natural Bounds via Physics Constants (No Explicit Clamps)
 
-The application is a static file bundle (`index.html`, `wasm_exec.js`, `main.wasm`) served from any HTTP origin. All simulation state lives in browser memory. There is no backend, no database, no user identity, and no shared state between users.
+**Strategy:** Choose drag coefficients large enough that terminal velocity is reached well within
+the visible play area. Let physics self-limit without runtime clamps.
 
-The relevant security boundaries are:
+**Terminal velocity analysis:**
 
-1. **File serving** — who can access the static files
-2. **Browser sandbox** — what the WASM binary can do inside the browser
+At full-ahead throttle (15000 N), the boat accelerates until drag equals thrust:
+```
+C_DRAG_FWD × v_terminal = THROTTLE_FORCE[4]
+3000 × v_terminal = 15000
+v_terminal ≈ 5 m/s ≈ 9.7 kt
+```
 
----
+At that speed, 1 second of travel = 5 m = 100 px — well within the visible canvas.
 
-## Option A — No Access Control (Open Static Hosting)
+Lateral terminal velocity (e.g. from wind beam-on at 15 kt):
+```
+C_DRAG_LAT × v_lat = WIND_K_LAT × (7.7 m/s)²
+80000 × v_lat ≈ 1600
+v_lat ≈ 0.02 m/s — near-zero
+```
 
-**Deployment flow:**  
-Files served by any static HTTP server (Nginx, GitHub Pages, local `python -m http.server`). No authentication layer. Anyone with the URL can load and use the simulator.
+Keel drag makes lateral drift negligible. Physics will not produce runaway lateral motion.
+
+**Angular terminal velocity** (from prop walk at stern, moment arm ~5 m):
+```
+torque_propwalk = 1500 N × 5 m = 7500 N·m
+C_DRAG_ROT × ω_terminal = 7500
+50000 × ω_terminal = 7500
+ω_terminal ≈ 0.15 rad/s → full rotation in ~42 s
+```
+
+Reasonable.
 
 **Pros:**
-- Zero implementation complexity
-- Matches the use case: single-user educational/training tool with no sensitive data
-- No tokens, sessions, or login flows to build or maintain
+- Zero implementation overhead — no clamp logic
+- Constants can be tuned together: lowering drag and raising thrust both increase terminal velocity proportionally
+- Correct physics behaviour: boat decelerates naturally, no step-function cutoffs
 
 **Cons:**
-- No restriction on who can access the file if hosted publicly
-- No audit trail of who ran simulations
+- If constants are mistuned, no safety net (boat could escape the visible area)
+- `dt` spike from tab-switch (mitigated by 0.1 s clamp — see architecture.md D2) could momentarily overshoot terminal velocity
 
-**Audit trail:** None.
-
-**Compromise risk:** None meaningful — there is no sensitive data, no server-side state, and no actions with side effects beyond the user's own browser tab.
-
-**Implementation complexity:** Low (none).
+**Audit:** None needed — there is no security impact.
 
 ---
 
-## Option B — Static Hosting Behind HTTP Basic Auth
+## Option B — Explicit Velocity Clamps After Integration
 
-**Deployment flow:**  
-Reverse proxy (Nginx, Caddy) sits in front of the static file server. Requests require a username/password via HTTP Basic Auth. WASM binary itself is unchanged.
+**Strategy:** After each `physicsStep` integration, clamp:
+```typescript
+const MAX_V = 10;    // m/s linear speed
+const MAX_ω = 1.0;  // rad/s angular speed
+
+const speed = Math.sqrt(boat.vx**2 + boat.vy**2);
+if (speed > MAX_V) {
+  const s = MAX_V / speed;
+  boat.vx *= s;
+  boat.vy *= s;
+}
+boat.omega = Math.max(-MAX_ω, Math.min(MAX_ω, boat.omega));
+```
 
 **Pros:**
-- Restricts access to the simulator to known users
-- Trivial to configure on any reverse proxy
-- No changes to Go code
+- Hard guarantee: boat never goes faster than visible play requires
+- Defensive against future constant changes that accidentally miscalibrate drag
 
 **Cons:**
-- Password sent base64-encoded each request (safe only over HTTPS — **HTTPS required**)
-- No per-user audit trail (shared credential typical for small teams)
-- Overkill for a local dev/training tool
-
-**Audit trail:** HTTP access logs at proxy level (IP + timestamp).
-
-**Compromise risk:** If credential is leaked, anyone can access the simulator — but there is still no server-side data to exfiltrate.
-
-**Implementation complexity:** Low (Nginx config only, outside Go codebase).
+- Adds 6 lines of code and two tunable constants
+- Creates a discontinuity: near the clamp boundary, adding more throttle has zero effect (unphysical feel)
+- The speed discontinuity is noticeable on rudder response: at `MAX_V` constant speed, reducing throttle causes instant deceleration feel
 
 ---
 
-## Recommendation
+## Recommendation: **Option A (natural bounds)**
 
-**Option A for MVP.**
+With the constants defined in `interface-spec.md`, the physics self-limits at physically plausible speeds. The 0.1 s `dt` clamp (architecture.md) is the only defensive measure needed.
 
-The simulator contains no sensitive data, no user PII, no server-side state, and produces no side effects outside the user's browser tab (architecture.md C4 Context). Access control adds zero security value in this context and would add implementation overhead with no benefit.
+**Why not B:** The velocity clamp introduces a non-physical "wall" at the speed limit that players will notice, particularly when changing rudder at full speed. The cost of debugging a miscalibrated constant is low (tweak one number); the cost of removing a clamp that causes visible artefacts is hidden design debt.
 
-If the project is later deployed as a shared training tool requiring access restriction, Option B (HTTP Basic Auth via reverse proxy) is the correct addition — it requires no changes to the Go codebase.
-
-The browser's built-in WASM sandbox is the effective security boundary: the WASM binary cannot access the filesystem, make arbitrary network requests, or escape the browser tab. This is provided by the browser runtime, not by application code.
+**Monitoring:** If constants are later adjusted and the boat escapes the view area, a simple `boat.x` / `boat.y` world-bounds check at the start of `physicsStep` can reset velocity (not position) to zero — a softer recovery than a hard clamp.
 
 ---
 
-## WASM Security Notes (for completeness)
+## Browser Security Boundary (informational)
 
-| Concern | Status |
-|---------|--------|
-| Filesystem access | Not possible from WASM (browser sandbox) |
-| Network requests | Not initiated by this app (architecture.md: "no network calls after initial load") |
-| Cross-origin data leakage | N/A — no external API calls |
-| WASM binary tampering | Mitigated by serving over HTTPS with correct MIME type |
-| `GOOS=js` binary | No CGO, no unsafe pointer use required for this app (constraints.md T1) |
+The WASM/TypeScript sandbox is the relevant security layer. The physics code:
+- Cannot access the filesystem, network, or DOM outside the `canvas` element
+- Cannot persist state between sessions (no localStorage writes)
+- Runs in the same browser origin sandbox as any JS bundle
 
-**HTTPS note:** The WASM file should be served over HTTPS in any non-localhost deployment. `wasm_exec.js` and `main.wasm` must be served with correct MIME types (`application/wasm` for `.wasm`).
+This is unchanged from the original `access-control.md` §WASM Security Notes — no new attack surface is introduced by adding physics.

@@ -1,434 +1,223 @@
-# Interface Specification — Internal Package Contracts
+---
+updated: 2026-05-14
+supersedes: original interface-spec.md (was Go package contracts; actual codebase is TypeScript)
+---
 
-*This app has no HTTP API. Interfaces are Go package boundaries. Each section defines one package's public surface: exported types, method signatures, and constraints.*
+# Interface Specification — Physics Subsystem
 
-*Sources: domain-model.md (entity fields, force models), constraints.md (C4/C6, P1–P6), architecture.md (D8/D9).*
+*Every decision references a fact in `docs/Research/`.*
 
 ---
 
-## Package: `internal/physics`
+## New Functions Added to `src/main.ts`
 
-Pure math. No Ebiten. No game state. Stateless functions + value types only.
+### `physicsStep(dt: number): void`
 
-### Vec2
+Single entry point for the physics simulation. Called from `render()` each frame before draw calls.
 
-```go
-type Vec2 struct {
-    X, Y float64  // meters (or any consistent unit)
+**Preconditions**: `gameMode === 'play'` AND `activeBoatIdx !== null` (caller guards).  
+**Input**: `dt` — elapsed seconds since last frame, clamped to `[0, 0.1]` by caller. Source: constraint T2 (`docs/Research/constraints.md`).  
+**Side effects**: mutates `boats[activeBoatIdx].{x, y, heading, vx, vy, omega}` only. No other boat or line is mutated.  
+**Reads**: `windAngle`, `windKt`, `activeBoatIdx`, `boats`, `mooringLines`, `staticCleats`.
+
+**Force accumulation order** (each adds to running `fx, fy, torque`):
+1. Hydrodynamic drag
+2. Engine thrust
+3. Propeller walk
+4. Rudder force
+5. Wind force
+6. Mooring line spring forces
+7. Collision penalty forces
+
+**Integration**: semi-implicit Euler — velocity updated before position:
+```
+vx += (fx/mass) * dt
+vy += (fy/mass) * dt
+omega += (torque/I) * dt
+x  += vx * dt
+y  += vy * dt
+heading += omega * dt
+```
+Source: architecture.md D4 (existing doc).
+
+---
+
+### `getCleatWorld(ref: CleatRef): [number, number]`
+
+Returns `[wx, wy]` in world-space meters for any cleat reference.
+
+For `kind === 'static'`: returns `[staticCleats[ref.idx].wx, staticCleats[ref.idx].wy]` directly.
+
+For `kind === 'moving'`: applies the identical SVG→local-canvas transform as `getMovingCleatCanvas`
+(lines ~332–344 in `src/main.ts`), then converts canvas offset to world:
+```typescript
+// lx, ly are local canvas-space offsets (Y-down, pixels)
+// rlx, rly are rotated by boat.heading
+wx = boat.x + rlx / SCALE
+wy = boat.y - rly / SCALE   // flip Y: canvas-down → world-up
+```
+Source: gap G2, coordinate system contract — `docs/Research/constraints.md` and `interfaces.md`.
+
+---
+
+### `computeNaturalLength(from: CleatRef, to: CleatRef): number`
+
+Returns the Euclidean distance (meters) between two cleats at call time.  
+Called once when a mooring line is created, to populate `MooringLine.naturalLength`.
+
+Source: domain-model.md §MooringLine — natural length = rest length at placement time.
+
+---
+
+## Modified Interfaces
+
+### `Boat` — three new optional velocity fields
+
+```typescript
+interface Boat {
+  // existing (unchanged)
+  type: BoatType;
+  x: number;
+  y: number;
+  heading: number;
+  rudderAngle: number;
+  throttlePort: number;
+  throttleStbd: number;
+  // new
+  vx?: number;    // world-space m/s; default 0 if absent
+  vy?: number;    // world-space m/s; default 0 if absent
+  omega?: number; // angular velocity rad/s; default 0 if absent
 }
-
-func (v Vec2) Add(u Vec2) Vec2
-func (v Vec2) Sub(u Vec2) Vec2
-func (v Vec2) Scale(s float64) Vec2
-func (v Vec2) Dot(u Vec2) float64
-func (v Vec2) Cross(u Vec2) float64   // scalar cross: v.X*u.Y - v.Y*u.X
-func (v Vec2) Len() float64
-func (v Vec2) Normalize() Vec2        // panics if len==0; caller must guard
-func (v Vec2) Rotate(angle float64) Vec2  // CCW rotation by angle radians
 ```
 
-**Constraint:** Normalize on zero vector is caller error — no silent fallback.
+Optional (`?`) so all existing `boats.push(...)` calls remain valid.
+`physicsStep` initialises any absent field to 0 on first call.
 
----
+Source: gap G1 — `docs/Research/constraints.md`. Interface lock constraint — `docs/Research/interfaces.md`.
 
-### RigidBody
+### `MooringLine` — one new required field
 
-```go
-type RigidBody struct {
-    Position   Vec2
-    Velocity   Vec2
-    Heading    float64   // radians, CCW from +x
-    AngularVel float64   // rad/s, CCW positive
-    Mass       float64   // kg, must be > 0
-    InertiaI   float64   // kg·m², must be > 0
-    ComOffset  Vec2      // CoM relative to geometric center, body-frame meters
+```typescript
+interface MooringLine {
+  from: CleatRef;
+  to: CleatRef;
+  naturalLength: number; // world metres — computed at line creation time
 }
 ```
 
----
+The single `mooringLines.push(...)` call (in `mousedown`) must be updated to pass `naturalLength`.
+`drawMooringLines` and `deleteBoat` iterate over lines but never read `naturalLength` — no change needed.
 
-### ForceAccumulator
-
-```go
-type ForceAccumulator struct {
-    Force  Vec2    // world-space, Newtons
-    Torque float64 // N·m, CCW positive
-}
-
-func (a *ForceAccumulator) Apply(force Vec2, worldPoint Vec2, comWorldPos Vec2)
-// Adds force to Force; adds cross(worldPoint - comWorldPos, force) to Torque.
-// worldPoint: where force is applied (e.g. cleat position)
-// comWorldPos: center of mass in world space
-
-func (a *ForceAccumulator) Reset()
-```
+Source: domain-model.md §MooringLine, constraint P1 (tension-only rope) — `docs/Research/constraints.md`.
 
 ---
 
-### Integrate
+## Physics Constants
 
-```go
-// Integrate advances body by one timestep using semi-implicit Euler.
-// dt must be > 0. Caller owns synchronization if called concurrently.
-func Integrate(body *RigidBody, acc ForceAccumulator, dt float64)
+All declared as module-level `const` in `src/main.ts` alongside existing constants (SCALE, CLEAT_R, etc.).
+
+### Boat Physical Properties
+
+```typescript
+const BOAT_MASS: Record<BoatType, number> = {
+  monohull:  7000,    // kg — typical 10 m monohull (domain-model.md)
+  catamaran: 12000,   // kg — typical 11 m catamaran
+};
+
+const BOAT_I: Record<BoatType, number> = {
+  monohull:  63600,   // kg·m² — (1/12)×7000×(3²+10²)
+  catamaran: 163000,  // kg·m² — (1/12)×12000×(6.5²+11²)
+};
 ```
 
-Implementation:
-```
-a = acc.Force / body.Mass
-α = acc.Torque / body.InertiaI
-body.Velocity    += a * dt          // update velocity first (semi-implicit)
-body.AngularVel  += α * dt
-body.Position    += body.Velocity * dt
-body.Heading     += body.AngularVel * dt
-```
+Moment of inertia uses rectangular approximation — `docs/Research/constraints.md` §What Can Be Decided.
 
----
+### Engine Thrust
 
-### Force Calculators (stateless functions)
-
-All return a `(force Vec2, applicationPoint Vec2)` pair so the caller passes to ForceAccumulator.Apply().
-
-```go
-// WindForce returns wind force on a hull in world space.
-// windVel: wind velocity vector (world-space, m/s)
-// heading: boat heading (radians)
-// longCoeff, latCoeff: drag coefficients (tunable, m² equivalent area)
-func WindForce(windVel Vec2, heading float64, longCoeff, latCoeff float64) Vec2
-// Applied at hull geometric center (caller passes comWorldPos as applicationPoint)
-
-// ThrustForce returns engine thrust vector.
-// heading: boat heading; thrustN: signed Newtons (+fwd, -astern)
-func ThrustForce(heading float64, thrustN float64) Vec2
-// Applied at stern (caller computes stern world position)
-
-// PropWalkForce returns lateral prop-walk force vector.
-// heading: boat heading; walkN: signed Newtons (+ = port, - = stbd)
-func PropWalkForce(heading float64, walkN float64) Vec2
-// Applied at stern
-
-// RudderForce returns rudder lateral force vector.
-// heading: boat heading; rudderAngle: radians (+stbd); bodyVelFwd: m/s along bow axis
-// coeff: rudder force coefficient
-// Constraint P5: if abs(bodyVelFwd) < 0.05 m/s, returns zero vector
-func RudderForce(heading float64, rudderAngle float64, bodyVelFwd float64, coeff float64) Vec2
-// Applied at rudder position (caller computes rudder world position, near stern)
-
-// HydroDragForce returns hydrodynamic drag forces in world space.
-// Returns (linearDrag Vec2, torqueDrag float64) — torqueDrag applied directly to accumulator
-// Constraint P3: latCoeff >> fwdCoeff
-func HydroDragForce(vel Vec2, heading float64, angularVel float64,
-    fwdCoeff, latCoeff, rotCoeff float64) (Vec2, float64)
+```typescript
+// Index = throttle integer (0=full astern … 4=full ahead). Values in Newtons.
+const THROTTLE_FORCE = [-10000, -4000, 0, 5000, 15000];
 ```
 
----
+Catamaran: each engine gets `THROTTLE_FORCE[throttle] / 2`.
+Monohull: all thrust from single engine `THROTTLE_FORCE[throttlePort]`.
+Applied along bow vector at stern position.
 
-### SpringForce
+### Propeller Walk
 
-```go
-// SpringForce computes mooring line tension force.
-// anchorPos: dock attachment point (world-space)
-// cleatPos: boat cleat position (world-space)
-// cleatVel: velocity of cleat point (world-space) = body.Velocity + ω × r
-// naturalLen: rest length (meters); stiffness: N/m; damping: N·s/m
-// Constraint P1: returns zero if currentLen <= naturalLen (tension-only)
-func SpringForce(anchorPos, cleatPos, cleatVel Vec2,
-    naturalLen, stiffness, damping float64) Vec2
+```typescript
+// Lateral force at stern in starboard direction (+stbd = positive). Newtons.
+// Right-handed screw convention: astern pushes stern to port (negative).
+const PROP_WALK_TABLE = [-1500, -500, 0, 250, 500];
 ```
 
----
+- Monohull: net lateral = `PROP_WALK_TABLE[throttlePort]` (single right-handed prop).
+- Catamaran: port engine (right-handed) = `+PROP_WALK_TABLE[throttlePort]`;
+  starboard engine (left-handed, contra-rotating) = `−PROP_WALK_TABLE[throttleStbd]`.
+  Net walk cancels when both throttles equal; amplifies on differential throttle.
+
+Source: constraint P4, P5 — `docs/Research/constraints.md`.
+
+### Hydrodynamic Drag (linear model)
+
+```typescript
+const C_DRAG_FWD = 3000;   // N/(m/s) — longitudinal drag
+const C_DRAG_LAT = 80000;  // N/(m/s) — lateral drag (keel effect, ~27× fwd)
+const C_DRAG_ROT = 50000;  // N·m/(rad/s) — rotational drag
+```
+
+Source: constraint P3 (lateral >> longitudinal) — `docs/Research/constraints.md`.
+
+### Rudder
+
+```typescript
+const C_RUDDER = 30000; // N per (rad × m/s forward speed)
+```
+
+`F_rudder = C_RUDDER × rudderAngle × vForward`. Applied at stern, perpendicular to heading.
+Zero contribution when `|vForward| < 0.05 m/s`. Source: constraint P2, P5.
+
+### Wind
+
+```typescript
+const WIND_K_FWD = 5;   // N/(m/s)² — bow-on wind drag coefficient
+const WIND_K_LAT = 27;  // N/(m/s)² — beam-on wind drag coefficient
+```
+
+Wind speed converted at use time: `ws_ms = windKt × 0.51444`.
+Force is quadratic: `F = K × |vw_component| × vw_component`.
+At 15 kt (7.7 m/s) beam-on: `27 × 7.7² ≈ 1600 N`.
+Source: domain-model.md §Wind Force.
+
+### Mooring Line Spring
+
+```typescript
+const MOORING_K = 50000; // N/m spring constant
+const MOORING_C = 10000; // N·s/m damping coefficient
+```
+
+Tension formula: `F = max(0, MOORING_K × extension − MOORING_C × extensionRate)`.
+Clamp ensures tension-only (constraint P1). Source: domain-model.md §MooringLine.
 
 ### Collision
 
-```go
-// CollisionPenalty detects overlap between two convex polygons and returns
-// a penalty spring force pushing polyA out of polyB.
-// verticesA, verticesB: polygon vertices in world-space, CCW winding
-// penaltyStiffness: N/m (should be >> mooring stiffness to prevent visible penetration)
-// Returns (force on A, contact point) — caller applies equal/opposite to B if B is dynamic.
-// Returns zero force if no overlap.
-func CollisionPenalty(verticesA, verticesB []Vec2, penaltyStiffness float64) (Vec2, Vec2)
+```typescript
+const COLLISION_K = 150000; // N/m penalty spring constant
 ```
 
-Internally uses SAT (Separating Axis Theorem). Handles degenerate case (zero-overlap) gracefully.
+Applied as `F = COLLISION_K × mtv` where `mtv` is the world-space MTV from `obbMTV()`.
+50% position correction applied simultaneously to prevent tunnelling at low dt.
+Source: constraint T5, decision in `docs/Research/constraints.md` §What Can Be Decided.
 
 ---
 
-## Package: `internal/sim`
-
-Game entity state. No Ebiten. Owns physics step.
-
-### Enums and Constants
-
-```go
-type ThrottleState int
-const (
-    ThrottleNeutral    ThrottleState = 0
-    ThrottleSlowFwd    ThrottleState = 1
-    ThrottleFullFwd    ThrottleState = 2
-    ThrottleSlowAstern ThrottleState = 3
-    ThrottleFullAstern ThrottleState = 4
-)
-// Constraint C6: exactly 5 states
-
-type CleatID int
-const (
-    CleatBow      CleatID = 0
-    CleatMidships CleatID = 1
-    CleatStern    CleatID = 2
-)
-// Constraint C4: only these 3 attachment points on boat
-
-type BoatType int
-const (
-    BoatMonohull  BoatType = 0
-    BoatCatamaran BoatType = 1
-)
-```
-
----
-
-### Boat
-
-```go
-type Boat struct {
-    ID       int               // unique, assigned at creation, immutable
-    Type     BoatType
-    Body     physics.RigidBody
-    HullLen  float64           // meters, bow-to-stern
-    HullBeam float64           // meters, max width
-    // Cleat offsets in body frame (bow=fwd, stern=aft), relative to CoM
-    Cleats   [3]physics.Vec2   // index: CleatBow, CleatMidships, CleatStern
-
-    // Active-boat controls (read by sim.World.Step; ignored for catamaran MVP)
-    Throttle  ThrottleState
-    PropWalk  float64  // N per unit; sign = handedness. Default: see constants.go
-    Rudder    float64  // radians, ±MaxRudderAngle
-    IsActive  bool
-
-    // Derived / cached (updated each step, not user-set)
-    HullVertices [4]physics.Vec2  // world-space corners of hull bounding box
-}
-
-// CleatWorldPos returns the world-space position of a cleat.
-func (b *Boat) CleatWorldPos(id CleatID) physics.Vec2
-
-// CleatVelocity returns the world-space velocity of a cleat point (body vel + ω × r).
-func (b *Boat) CleatVelocity(id CleatID) physics.Vec2
-
-// Constraints:
-//   HullLen  ∈ (0, 100] meters
-//   HullBeam ∈ (0, 20]  meters
-//   Rudder   ∈ [-MaxRudderAngle, +MaxRudderAngle] (clamped on set, default ±35°)
-//   Mass     > 0 (set via Body.Mass)
-```
-
----
-
-### Dock
-
-```go
-type Dock struct {
-    Vertices []physics.Vec2  // polygon, world-space, CCW winding, min 4 points
-    // For straight pier MVP: exactly 4 vertices (axis-aligned or rotated rectangle)
-}
-
-// NewStraightPier creates a dock aligned along the top edge of the world.
-// pos: center of pier face (the boat-facing edge), width: pier length, depth: pier thickness
-func NewStraightPier(pos physics.Vec2, width, depth float64) Dock
-
-// NearestPointOnEdge returns the world-space point on the dock boundary
-// closest to p. Used for dock-end mooring line placement (constraint C5).
-func (d *Dock) NearestPointOnEdge(p physics.Vec2) physics.Vec2
-```
-
----
-
-### MooringLine
-
-```go
-type MooringLine struct {
-    DockPoint     physics.Vec2  // world-space, on dock boundary
-    BoatID        int
-    Cleat         CleatID
-    NaturalLength float64   // meters; set to 0.95 * initialDist at placement
-    Stiffness     float64   // N/m; default from constants.go
-    Damping       float64   // N·s/m; default from constants.go
-}
-
-// CurrentLength computes the present line length given boat state.
-func (l *MooringLine) CurrentLength(boats []*Boat) float64
-
-// Tension returns the current tension force magnitude (0 if slack).
-// Constraint P1: non-negative always.
-func (l *MooringLine) Tension(boats []*Boat) float64
-```
-
----
-
-### WindField
-
-```go
-type WindField struct {
-    Speed     float64  // m/s, ∈ [0, 30]
-    Direction float64  // radians, wind-FROM direction (0 = from +x / east)
-}
-
-func (w WindField) Velocity() physics.Vec2  // wind velocity vector (world-space, m/s)
-```
-
----
-
-### World
-
-```go
-type World struct {
-    Boats []*Boat
-    Dock  Dock
-    Lines []MooringLine
-    Wind  WindField
-    Time  float64  // simulation seconds since start
-}
-
-// Step advances the simulation by dt seconds.
-// Applies all forces to all boats, detects and resolves collisions, integrates.
-// dt should be 1/60 or configured fixed timestep; must be > 0.
-func (w *World) Step(dt float64)
-
-// ApplyCommand mutates world state (throttle, rudder, wind, active boat, mooring lines).
-func (w *World) ApplyCommand(cmd input.Command)
-
-// ActiveBoat returns the currently active boat, or nil if none.
-func (w *World) ActiveBoat() *Boat
-
-// SetActiveBoat changes the active boat by ID. No-op if ID not found.
-func (w *World) SetActiveBoat(id int)
-
-// AddMooringLine validates and appends a line. Returns error if BoatID invalid,
-// CleatID out of range, or dock point is not on dock boundary.
-func (w *World) AddMooringLine(line MooringLine) error
-
-// RemoveMooringLine removes line by index. Index out of range = no-op.
-func (w *World) RemoveMooringLine(idx int)
-```
-
----
-
-## Package: `internal/input`
-
-Maps Ebiten input state → typed Commands. No physics, no rendering.
-
-### Command
-
-```go
-type CommandType int
-const (
-    CmdSetThrottle    CommandType = iota  // payload: ThrottlePayload
-    CmdSetRudder                          // payload: RudderPayload
-    CmdSetWind                            // payload: WindPayload
-    CmdSelectBoat                         // payload: SelectBoatPayload
-    CmdAddMooringLine                     // payload: AddLinePayload
-    CmdRemoveMooringLine                  // payload: int (line index)
-    CmdAddBoat                            // payload: AddBoatPayload
-)
-
-type Command struct {
-    Type    CommandType
-    Payload any
-}
-
-type ThrottlePayload  struct{ State sim.ThrottleState }
-type RudderPayload    struct{ Angle float64 }            // radians, clamped externally
-type WindPayload      struct{ Speed, Direction float64 } // m/s, radians
-type SelectBoatPayload struct{ BoatID int }
-type AddLinePayload   struct {
-    DockPoint physics.Vec2
-    BoatID    int
-    Cleat     sim.CleatID
-}
-type AddBoatPayload   struct {
-    Type     sim.BoatType
-    Position physics.Vec2
-    Heading  float64
-}
-```
-
-### Handler
-
-```go
-type Handler struct{ /* ebiten state */ }
-
-// Poll reads current Ebiten input state and returns zero or more Commands.
-// Called once per Update() tick. Returns nil slice (not error) on no input.
-func (h *Handler) Poll(mouseX, mouseY int, world *sim.World) []Command
-```
-
-**Key mappings (defaults):**
-
-| Input | Command |
-|-------|---------|
-| `W` / `S` | Throttle up/down (cycles through 5 states) |
-| `A` / `D` | Rudder left/right (±5° per tick, held = continuous) |
-| `0`..`4` numpad | Set throttle directly |
-| Click on boat | SelectBoat |
-| Click on dock edge then boat cleat | AddMooringLine (two-step interaction) |
-| Right-click on mooring line | RemoveMooringLine |
-| Mouse wheel on wind panel | SetWind speed |
-
----
-
-## Package: `internal/render`
-
-Reads sim.World, produces Ebiten draw calls. No state mutation.
-
-### Viewport
-
-```go
-type Viewport struct {
-    OriginWorld physics.Vec2  // world-space point at screen top-left
-    Scale       float64       // pixels per meter; default 20
-    ScreenW     int
-    ScreenH     int
-}
-
-func (v Viewport) WorldToScreen(p physics.Vec2) (x, y float64)
-func (v Viewport) ScreenToWorld(x, y float64) physics.Vec2
-```
-
-### Renderer
-
-```go
-type Renderer struct {
-    VP Viewport
-}
-
-// Draw renders the full world state onto screen.
-func (r *Renderer) Draw(screen *ebiten.Image, world *sim.World)
-```
-
-Draw order (painter's algorithm, back to front):
-1. Water background (solid fill)
-2. Dock (grey filled polygon)
-3. Mooring lines (color by tension: slack=grey, taut=yellow, max=red)
-4. Boats (hull polygon + CoM dot + cleat dots)
-5. Active boat highlight (bright outline)
-6. Placement preview (ghost line during mooring line placement)
-
----
-
-## Package: `internal/ui`
-
-On-canvas panels rendered via Ebiten. Reads world for display; emits Commands via returned slice.
-
-```go
-type HUD struct{ /* panel layout state */ }
-
-// Draw renders all UI panels and returns any Commands triggered by user interaction.
-func (h *HUD) Draw(screen *ebiten.Image, world *sim.World) []Command
-```
-
-**Panels (MVP):**
-- Top-left: active boat info (speed, heading, throttle indicator)
-- Top-right: wind controls (speed + direction dial)
-- Bottom: rudder visual indicator
-- Hover: mooring line tension readout on mouse-over
+## Value Constraints
+
+| Value | Allowed range | Enforcement |
+|-------|--------------|-------------|
+| `dt` | [0, 0.1] s | clamped in `render()` before call |
+| `throttlePort`, `throttleStbd` | 0..4 integer | existing slider; THROTTLE_FORCE indexed directly |
+| `rudderAngle` | [−0.6109, +0.6109] rad | existing slider |
+| `windKt` | [0, 99] | existing input |
+| `vx`, `vy` | unclamped | drag naturally limits terminal velocity |
+| `omega` | unclamped | rotational drag naturally limits |

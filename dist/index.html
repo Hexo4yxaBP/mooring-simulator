@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mooring Simulator</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { display: flex; height: 100vh; overflow: hidden; font-family: system-ui, sans-serif; }
+
+    #palette {
+      width: 120px;
+      flex-shrink: 0;
+      background: #1a2533;
+      border-right: 1px solid #2d4a6b;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px 8px;
+      gap: 16px;
+    }
+
+    #palette h3 {
+      color: #7ab5d4;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .boat-icon {
+      cursor: grab;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 8px;
+      border: 1px solid #2d4a6b;
+      border-radius: 6px;
+      background: #0f1c2b;
+      width: 100%;
+      user-select: none;
+      transition: border-color 0.15s, background 0.15s;
+    }
+
+    .boat-icon:hover {
+      border-color: #7ab5d4;
+      background: #152333;
+    }
+
+    .boat-icon.disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+
+    .boat-icon img {
+      width: 36px;
+      height: 54px;
+      object-fit: contain;
+      filter: invert(1) brightness(1.5);
+    }
+
+    .boat-icon span {
+      color: #7ab5d4;
+      font-size: 11px;
+    }
+
+    #play-btn {
+      width: 100%;
+      padding: 9px 0;
+      border-radius: 6px;
+      font-size: 20px;
+      font-weight: bold;
+      cursor: pointer;
+      transition: opacity 0.15s;
+      user-select: none;
+    }
+
+    #play-btn.is-play {
+      background: #0d2b14;
+      color: #5cb85c;
+      border: 1px solid #3a8a3a;
+    }
+
+    #play-btn.is-stop {
+      background: #2b0d0d;
+      color: #e05555;
+      border: 1px solid #8a3a3a;
+    }
+
+    #play-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+
+    .palette-section {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      border-top: 1px solid #2d4a6b;
+      padding-top: 14px;
+    }
+
+    .palette-section h3 {
+      color: #7ab5d4;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .wind-row {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      color: #7ab5d4;
+      font-size: 12px;
+    }
+
+    #wind-kt-input {
+      width: 46px;
+      background: #0f1c2b;
+      border: 1px solid #2d4a6b;
+      border-radius: 4px;
+      color: #7ab5d4;
+      font-size: 12px;
+      padding: 4px 6px;
+      text-align: right;
+      outline: none;
+    }
+
+    #wind-kt-input:focus {
+      border-color: #7ab5d4;
+    }
+
+    canvas {
+      flex: 1;
+      display: block;
+      cursor: crosshair;
+    }
+
+    #rudder-panel {
+      position: fixed;
+      bottom: 24px;
+      left: calc(60px + 50vw);
+      transform: translateX(-50%);
+      background: rgba(15, 28, 43, 0.90);
+      border: 1px solid #2d4a6b;
+      border-radius: 8px;
+      padding: 10px 18px 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      z-index: 10;
+      color: #7ab5d4;
+      font-size: 12px;
+      font-weight: 600;
+      user-select: none;
+    }
+
+    #rudder-slider {
+      width: 160px;
+      cursor: pointer;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      border-radius: 2px;
+      outline: none;
+      background: #2d4a6b;
+    }
+
+    #rudder-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #7ab5d4;
+      cursor: pointer;
+    }
+
+    #rudder-slider::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #7ab5d4;
+      cursor: pointer;
+      border: none;
+    }
+
+    #rudder-slider::-moz-range-track {
+      background: transparent;
+      height: 4px;
+    }
+
+    #throttle-panel {
+      position: fixed;
+      right: 24px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: rgba(15, 28, 43, 0.90);
+      border: 1px solid #2d4a6b;
+      border-radius: 8px;
+      padding: 10px 14px 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      z-index: 10;
+      color: #7ab5d4;
+      font-weight: 600;
+      user-select: none;
+    }
+
+    #throttle-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    #throttle-body {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    /* tick labels column — absolute-positioned to align with slider thumbs */
+    #throttle-labels {
+      position: relative;
+      width: 12px;
+      height: 158px; /* 18px col-header + 140px slider */
+    }
+
+    #throttle-labels span {
+      position: absolute;
+      right: 0;
+      font-size: 11px;
+      line-height: 1;
+      transform: translateY(-50%);
+    }
+
+    /* positions = 18px col-header offset + thumb travel positions */
+    #throttle-labels span:nth-child(1) { top: 25px; }
+    #throttle-labels span:nth-child(2) { top: 56.5px; }
+    #throttle-labels span:nth-child(3) { top: 88px; }
+    #throttle-labels span:nth-child(4) { top: 119.5px; }
+    #throttle-labels span:nth-child(5) { top: 151px; }
+
+    /* one column = col-header + vertical slider */
+    .t-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .t-hdr {
+      font-size: 11px;
+      line-height: 1;
+      height: 14px;
+      display: flex;
+      align-items: center;
+    }
+
+    .t-wrap {
+      width: 20px;
+      height: 140px;
+      position: relative;
+    }
+
+    .tslider {
+      -webkit-appearance: none;
+      appearance: none;
+      position: absolute;
+      width: 140px;
+      height: 4px;
+      top: calc(50% - 2px);
+      left: calc(50% - 70px);
+      transform: rotate(-90deg);
+      background: #2d4a6b;
+      outline: none;
+      cursor: pointer;
+      border-radius: 2px;
+    }
+
+    .tslider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #7ab5d4;
+      cursor: pointer;
+    }
+
+    .tslider::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #7ab5d4;
+      cursor: pointer;
+      border: none;
+    }
+
+    .tslider::-moz-range-track {
+      background: transparent;
+      height: 4px;
+    }
+  </style>
+  <script type="module" crossorigin src="/assets/index-BJVeey2Q.js"></script>
+</head>
+<body>
+  <aside id="palette">
+    <button id="play-btn" class="is-play" disabled title="Select a boat to enable Play mode">▶</button>
+    <h3>Boats</h3>
+    <div class="boat-icon" draggable="true" data-type="monohull">
+      <img src="/boats/monohull.svg" alt="Monohull">
+      <span>Monohull</span>
+    </div>
+    <div class="boat-icon" draggable="true" data-type="catamaran">
+      <img src="/boats/catamaran.svg" alt="Catamaran">
+      <span>Catamaran</span>
+    </div>
+    <div class="palette-section">
+      <h3>Wind</h3>
+      <div class="wind-row">
+        <input id="wind-kt-input" type="number" min="0" max="99" step="1" value="10">
+        <span>kt</span>
+      </div>
+    </div>
+  </aside>
+  <canvas id="canvas"></canvas>
+  <div id="throttle-panel" style="display:none">
+    <div id="throttle-title">Throttle</div>
+    <div id="throttle-body">
+      <div id="throttle-labels">
+        <span>F</span>
+        <span>A</span>
+        <span>N</span>
+        <span>S</span>
+        <span>R</span>
+      </div>
+      <div class="t-col">
+        <span class="t-hdr" id="t-hdr-p">P</span>
+        <div class="t-wrap">
+          <input class="tslider" id="tslider-p" type="range" min="0" max="4" step="1" value="2">
+        </div>
+      </div>
+      <div class="t-col" id="t-col-s">
+        <span class="t-hdr">S</span>
+        <div class="t-wrap">
+          <input class="tslider" id="tslider-s" type="range" min="0" max="4" step="1" value="2">
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="rudder-panel" style="display:none">
+    <span>Rudder: <strong id="rudder-deg">0</strong>°</span>
+    <input id="rudder-slider" type="range" min="-35" max="35" step="1" value="0">
+  </div>
+</body>
+</html>

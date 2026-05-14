@@ -1,83 +1,110 @@
-# Task Brief — Mooring Simulator
+---
+updated: 2026-05-14
+supersedes: original task-brief.md (was Go/WASM; actual codebase is TypeScript)
+---
+
+# Task Brief — Physics Simulation
 
 ## 1. Task Type
 
-**Greenfield application.** No existing codebase, build system, or tooling. Starting from zero.
+**Adding functionality to existing codebase.**
 
-Sub-classification: browser-based 2D real-time physics game / simulator.
+Sub-type: game physics integration — adding a continuous force-based simulation loop to a
+browser canvas simulator that currently has no physics (boats are positioned by drag-and-drop only).
+
+---
 
 ## 2. Input Data
 
 | Source | Location | What it provides |
 |--------|----------|-----------------|
-| Problem statement | `initial-problem.md` | Full feature spec, stack choice (Go) |
-| CLAUDE.md | `CLAUDE.md` | Project status (empty repo), stack TBD beyond "Go-based" |
-| README | `README.md` | Title only |
+| Application source | `src/main.ts` | Entire app — ~983 lines, single file |
+| Boat SVG assets | `public/boats/monohull.svg`, `catamaran.svg` | Hull outline shapes |
+| User task statement | This conversation | Physics forces required |
+| HTML entry point | `index.html` | UI panels: rudder slider, throttle sliders, wind input |
 
-No API specs, schemas, existing code, or additional documentation exist.
+No external API specs, test suite, or build system beyond Vite.
 
-## 3. Facts Extracted from Problem Statement
+---
 
-**Rendering:**
-- Browser-based
-- Top-down 2D view
-- Schematic (simple geometric shapes — not realistic graphics)
-- Elements to render: boats (hull outline + CoM marker), dock, water background, mooring lines
+## 3. Facts About the Current System
 
-**Entities:**
-- One or more boats (monohull sailboat + catamaran)
-- A dock (fixed in space)
-- Mooring lines / springs (dock point → boat cleat)
+### Coordinate system
+- **World space**: Y-up, meters, origin at canvas centre. `SCALE = 20 px/m`.
+- **Canvas space**: Y-down pixels, origin top-left.
+- Conversion: `worldToCanvas(wx, wy) → [cw/2 + wx·S, ch/2 − wy·S]`
+- `boat.x`, `boat.y` are world-space positions in meters.
+- `boat.heading`: radians, `0 = bow pointing north (up)`.
 
-**Boat controls (per active/selected boat):**
-- Rudder position (angle)
-- Throttle: Neutral | Slow Forward | Full Forward | Slow Astern | Full Astern
-- Prop walk parameter (tunable per boat)
+### Boat state (no physics yet)
+```typescript
+interface Boat {
+  type: 'monohull' | 'catamaran';
+  x: number;          // world m
+  y: number;          // world m
+  heading: number;    // rad, 0=north
+  rudderAngle: number; // rad, ±35°
+  throttlePort: number; // 0..4  (0=full astern, 2=neutral, 4=full ahead)
+  throttleStbd: number; // catamaran only; same range
+}
+```
+**Missing for physics**: `vx`, `vy` (m/s world-space velocity), `omega` (rad/s angular velocity).
 
-**Mooring line placement:**
-- Dock end: any point on dock
-- Boat end: only at cleats — stern, midships, bow
+### Simulation loop
+`render()` calls `requestAnimationFrame(render)` — **variable timestep, no `dt` tracking**.
+No physics update step exists. Boat position/heading is only mutated by drag handlers.
 
-**Physics forces to simulate:**
-1. Wind (strength + direction) — global parameter
-2. Engine thrust — function of throttle state
-3. Prop walk — lateral force, tunable, stronger in reverse
-4. Rudder — lateral force + torque, requires boat speed
-5. Mooring line tension — spring/elastic, applied at cleat
-6. Center of mass — determines torque arm for all forces
-7. Contact/collision with other boats and with dock
+### Wind
+- `windAngle: number` — radians, 0 = blowing toward north.
+- `windKt: number` — speed in knots (0–99), global.
+- Both are already available to any new physics code.
 
-**Multi-boat:**
-- Multiple boats can be in the water simultaneously
-- One boat is "active" (user-controlled) at a time
+### Throttle mapping
+| Slider value | Meaning |
+|---|---|
+| 0 | Full astern |
+| 1 | Slow astern |
+| 2 | Neutral |
+| 3 | Slow ahead |
+| 4 | Full ahead |
+
+Thrust fractions to derive: [-1, -0.5, 0, +0.5, +1] (implementation decision, not yet in code).
+
+### Mooring lines
+- Stored as `MooringLine[]` — pairs of `CleatRef` (static index or boat+cleat index).
+- Currently **zero-force**: lines are drawn but apply no spring tension.
+- `getCleatCanvas(ref)` returns canvas-space `[cx, cy]`. World-space equivalent needed for physics.
+- All cleats are points (no length/elasticity constants defined).
+
+### Hull geometry
+Both hulls are **cubic bezier curves** stored as `Path2D` objects in `OUTLINE_PATHS`.
+Canvas uses `ctx.stroke(path)` within a `translate + rotate + scale(1,−1)` transform.
+For physics, hulls must be sampled to polygon vertices.
+
+Monohull: 1 closed bezier path, symmetric, ~12.5 m long × 3 m wide (SVG units map to BOAT_SIZE).
+Catamaran: 2 hull paths + 1 deck rect, ~11 m long × 6.5 m wide.
+
+Cleat positions are defined separately in `CLEAT_SVG` (SVG path space, 6 cleats per boat).
+
+### Collision (current)
+OBB SAT (`obbMTV()`) used during drag-and-drop only. Returns MTV vector in world space.
+**Not called during physics update.** Pier is an infinite-depth OBB below the waterline.
+
+### Play mode
+`gameMode: 'setup' | 'play'` — physics must only run when `gameMode === 'play'`.
+`activeBoatIdx: number | null` — the one user-controlled boat.
+
+---
 
 ## 4. Phase 1 Questions
 
-### Go + Browser Architecture
-1. Pure client-side (Go → WASM, no server) or Go server + thin JS frontend?
-2. Use an existing Go 2D game library (e.g., Ebiten which compiles to WASM), or raw WASM + Canvas API?
-
-### Physics Fidelity
-3. Target accuracy level — nautical-grade (real hydrodynamic coefficients) or tunable/gameplay feel?
-4. Real-time continuous simulation or user can pause/step?
-
-### Boats
-5. How physically distinct should monohull vs catamaran be? (Catamaran typically has twin engines → two independent prop walks, wider hull, different CoM height)
-6. Are boat dimensions/mass fixed defaults, or user-configurable per session?
-
-### Dock
-7. Dock shape — single straight pier, L-shape, T-shape, or multiple configurations?
-8. Is the dock a hard collision boundary, or can boats pass through it (i.e., is collision detection required)?
-
-### Mooring Lines
-9. Are mooring lines always elastic (spring), or can they be inextensible (taut line, zero extension)?
-10. Maximum number of mooring lines per session?
-
-### Interaction / UI
-11. How is a boat selected as "active"? Click on it?
-12. How are mooring lines placed? Click dock point then click cleat?
-13. Is there a scenario/level system, or is it pure sandbox?
-14. Should wind affect monohull and catamaran differently (different sail/windage area)?
-
-### Collisions
-15. Collision response type: penalty spring (soft), impulse (hard), or simply prevent penetration?
+| # | Question | Why it matters |
+|---|----------|----------------|
+| Q1 | Physics accuracy: naval-grade coefficients vs tunable gameplay constants? | Determines whether to model hydrodynamic lift/drag curves or use hand-tuned values |
+| Q2 | Does wind affect inactive (non-active) boats too, or active boat only? | Scope of per-frame update loop |
+| Q3 | Should mooring line tension prevent hull penetration into the pier, or is pier collision separate? | Force superposition vs constraint priority |
+| Q4 | Mooring line model: simple Hookean spring, or spring + damper, or inextensible? | Determines tension formula and stability requirement |
+| Q5 | Mass model: fixed constants per boat type, or user-configurable? | Affects acceleration calculation |
+| Q6 | Catamaran prop walk: independent port/starboard engines each produce their own walk, or averaged? | Torque model for catamaran |
+| Q7 | Collision response: penalty spring (continuous force) or impulse (instantaneous)? | Determines solver architecture |
+| Q8 | Hull collision: use existing OBB SAT or upgrade to bezier polygon approximation? | Accuracy vs implementation complexity |

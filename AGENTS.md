@@ -8,129 +8,149 @@ Agent and contributor reference for this repository.
 
 | Layer | Technology | Version |
 |-------|-----------|---------|
-| Language | Go | 1.22+ |
-| Game engine / rendering | Ebiten v2 | `github.com/hajimehoshi/ebiten/v2` |
-| Build target | WebAssembly (`GOOS=js GOARCH=wasm`) | Go stdlib WASM |
-| Physics | Custom pure-Go (no CGO) | — |
-| WASM runtime shim | `wasm_exec.js` from Go SDK | matches Go version |
+| Language | TypeScript | 5.x (strict mode) |
+| Bundler | Vite | latest |
+| Rendering | HTML5 Canvas 2D API | browser built-in |
+| Physics | Custom inline (no library) | in `src/main.ts` |
+| UI | HTML + CSS overlay panels | `index.html` |
 
-**No CGO. No external physics library. No server.** The binary is a self-contained static WASM file.
+**No external physics library. No server. No test runner (yet).**
+The entire app is `src/main.ts` (~1100 lines after physics) + `index.html`.
 
 ---
 
-## Build Commands
+## Build and Serve Commands
 
 ```bash
-# Native build (for testing, not the final target)
-go build ./...
+# Install dependencies (first time)
+npm install
 
-# WASM production build
-GOOS=js GOARCH=wasm go build -o main.wasm .
-
-# Serve locally (after WASM build)
+# Development server with hot reload
+npx vite
+# or:
 make serve
-# or manually:
-go run tools/serve.go   # http://localhost:8080
+
+# Production build (outputs to dist/)
+npx vite build
+
+# Type check only (no emit)
+npx tsc --noEmit
 ```
+
+Dev server runs at `http://localhost:5173` by default (Vite) or `http://localhost:8080` if using `make serve`.
 
 ---
 
 ## Test Commands
 
-```bash
-# All unit + integration tests (native — no browser needed)
-go test ./internal/...
-
-# With race detector (required before merge)
-go test -race ./internal/physics/... ./internal/sim/... ./internal/input/...
-
-# With coverage report
-go test -coverprofile=coverage.out ./internal/physics/... ./internal/sim/...
-go tool cover -func=coverage.out
-
-# Specific integration scenario
-go test -run TestWorldStep ./internal/sim/...
-
-# Smoke test (world init + 10 sim-seconds without panic)
-go test -run TestWorldInit ./internal/sim/...
-```
-
----
-
-## Linting and Static Analysis
+The project has no automated test runner. Verification happens at two levels:
 
 ```bash
-go vet ./...
-staticcheck ./...          # install: go install honnef.co/go/tools/cmd/staticcheck@latest
-govulncheck ./...          # install: go install golang.org/x/vuln/cmd/govulncheck@latest
+# 1. Type check (required before every commit)
+npx tsc --noEmit
+
+# 2. Lint (if eslint is configured)
+npx eslint src/main.ts
+
+# 3. Production build (catches bundler errors)
+npx vite build
 ```
 
-All three must pass with zero findings before any task is marked done.
+Manual browser smoke tests are defined in `docs/Plan/implementation-tasks.md` §TASK-021.
 
 ---
 
 ## Code Conventions
 
+### Single-file architecture
+All application logic lives in `src/main.ts`. Physics constants, interfaces, helper functions,
+event handlers, and the render loop are all in this file. Do not create additional `.ts` files
+without a deliberate refactoring task.
+
+### Coordinate system (critical)
+- **World space**: Y-up, meters. Origin at canvas centre. `SCALE = 20 px/m`.
+- **Canvas space**: Y-down, pixels. Origin at canvas top-left.
+- Transforms: `worldToCanvas(wx, wy)` and `canvasToWorld(cx, cy)` (lines ~248–260 in `src/main.ts`).
+- `boat.heading = 0` means bow pointing north (world +Y).
+- Bow unit vector in world space: `(sin(heading), cos(heading))`.
+- Starboard unit vector: `(cos(heading), -sin(heading))`.
+- **These conventions are used everywhere including OBB SAT, physics forces, and draw code. Do not change them.**
+
 ### Validation boundary
-All user input (keyboard, mouse) is validated and range-clamped in `internal/input` before being passed as typed `Command` values to `internal/sim`. The `sim` package **trusts** incoming `Command` values as already valid. Do not add redundant validation inside `sim.ApplyCommand`.
+- User inputs (sliders, click positions) are validated and clamped in the event handlers.
+- Physics functions trust their inputs. Do not add re-validation inside `physicsStep`.
 
-### Error handling
-- `sim.AddMooringLine` returns `error` for invalid boat ID or cleat. Caller (main.go) logs and discards the command.
-- All other mutation methods are panic-free (invalid indices are no-ops).
-- No error wrapping libraries — stdlib `errors.New` / `fmt.Errorf` only.
+### Typing rules
+- TypeScript strict mode is on: `"strict": true` in tsconfig.
+- `noUnusedLocals: true`, `noUnusedParameters: true` — every declared variable and parameter must be used.
+- No `any` types in new code. Use proper types or `unknown` with a type guard.
+- Interface extensions use optional fields (`?`) to maintain backward compatibility with all existing `boats.push(...)` call sites.
 
-### Package dependency rule (hard constraint)
-```
-physics ← sim ← main → render, input, ui
-```
-`internal/physics` and `internal/sim` must **never** import Ebiten. Verify with:
-```
-go list -f '{{.Imports}}' ./internal/physics/... | grep ebiten  # must be empty
-go list -f '{{.Imports}}' ./internal/sim/...    | grep ebiten  # must be empty
-```
+### Physics constants
+All tunable physics constants are declared as module-level `const` near the top of `src/main.ts`,
+alongside `SCALE`, `CLEAT_R`, etc. Do not hard-code physics values (force magnitudes, drag
+coefficients, mass) inside `physicsStep` or other functions.
 
-### No unsafe, no CGO
-```bash
-grep -r "unsafe" --include="*.go" .    # must return empty
-grep -r '"C"' --include="*.go" .       # must return empty
-```
+### Naming
+- Constants: `SCREAMING_SNAKE_CASE`
+- Functions: `camelCase`
+- Interfaces: `PascalCase`
+- Event listener blocks: inline anonymous functions (existing convention)
 
-### Coordinate system
-- Physics world: Y-up, meters, CCW angles
-- Screen space: Y-down, pixels
-- Y-flip happens **only** in `internal/render/viewport.go` `WorldToScreen`. Nowhere else.
-
-### Constants
-All tunable physics constants (thrust, drag, spring stiffness, etc.) live in `internal/sim/constants.go`. Do not hard-code numeric values in force functions or `World.Step`.
+### No comments on what the code does
+Add a comment only when the WHY is non-obvious: a hidden constraint, a coordinate convention,
+a derivation formula, or a workaround. Do not describe what a function does if its name and
+types already convey that.
 
 ### Commit conventions
 ```
 <type>(<scope>): <short description>
 
 type: feat | fix | test | refactor | docs | build
-scope: physics | sim | render | input | ui | main | docs
+scope: physics | render | ui | input | docs
 ```
-Example: `feat(physics): add SAT collision penalty`
+Example: `feat(physics): add mooring line spring forces`
 
 ---
 
-## Coverage Thresholds
+## Physics Implementation Reference
 
-| Package | Minimum |
-|---------|---------|
-| `internal/physics` | 90% |
-| `internal/sim` | 80% |
-| `internal/input` | 80% |
-| `internal/render` | 60% (viewport only) |
+After physics is implemented, `physicsStep(dt)` is called in `render()` before draw calls:
+
+```typescript
+// In render():
+const dt = Math.min((now - lastTime) / 1000, 0.1);
+lastTime = now;
+if (gameMode === 'play' && activeBoatIdx !== null) {
+  physicsStep(dt);
+}
+```
+
+Force accumulation order inside `physicsStep`:
+1. Hydrodynamic drag
+2. Engine thrust + propeller walk
+3. Rudder force
+4. Wind force
+5. Mooring line spring forces
+6. Collision penalty forces
+
+Integration: semi-implicit Euler (velocity updated before position).
+
+See `docs/Design/interface-spec.md` for all physics constants and their rationale.
+See `docs/Design/architecture.md` for the full sequence diagram.
 
 ---
 
 ## MVP Scope Boundary
 
-Do not implement the following without a new task:
-- Catamaran engine / prop walk (post-MVP)
-- User-configurable dock shape (post-MVP)
-- Inextensible mooring lines (post-MVP)
-- User-editable boat parameters (post-MVP)
+In-scope for current physics implementation:
+- Full physics on active boat only
+- Wind force, engine thrust, prop walk, rudder, mooring springs, OBB collision
 
-See docs/Design/architecture.md "MVP Scope Boundary" for full list.
+Deferred (do not implement without a new task):
+- Wind drift on inactive boats
+- Inextensible (rigid) mooring lines
+- Bezier polygon hull collision (hull-accurate vs OBB)
+- User-configurable boat parameters
+
+See `docs/Design/architecture.md` §MVP Scope Boundary.

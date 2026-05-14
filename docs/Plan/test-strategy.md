@@ -1,160 +1,154 @@
-# Test Strategy — Mooring Simulator
+---
+updated: 2026-05-14
+supersedes: original test-strategy.md (was Go test runner; actual codebase is TypeScript, no test runner configured)
+---
 
-*Sources: architecture.md (D9: physics/sim must not import Ebiten, enabling native testing), interface-spec.md (contracts per package), implementation-tasks.md (TASK-070..082).*
+# Test Strategy — Physics Simulation
+
+*Sources: architecture.md (D1–D8), interface-spec.md (value constraints), implementation-tasks.md (TASK-020..022).*
 
 ---
 
 ## Testing Philosophy
 
-The app separates physics and simulation logic from rendering (architecture D9). This means `internal/physics` and `internal/sim` can be fully tested with plain `go test` on any platform — no browser, no WASM, no display required. Only `internal/render` and `internal/ui` require Ebiten, and those are tested by visual inspection only.
+The physics subsystem is added to a single-file TypeScript app (`src/main.ts`). There is no
+test runner configured. The testing strategy has three layers, in order of automation:
+
+1. **Type check** — `npx tsc --noEmit` catches interface mismatches, missing fields, wrong types.
+   This is the only automated test gate.
+2. **Behavioral assertions** — each task in Group 1 defines in-code assertions as `console.assert`
+   or inline spot checks that can be run from the browser DevTools console.
+3. **Manual smoke tests** — TASK-021 defines 9 observable behaviors the developer verifies
+   by hand in the browser. These are the acceptance gate for the full feature.
+
+No test framework (Jest, Vitest, etc.) is introduced by this plan. Adding one is a separate task.
 
 ---
 
-## Test Pyramid
+## Layer 1 — TypeScript Type Check (automated)
 
+**Command:**
 ```
-              [Manual/Visual]
-           TASK-041..044, 050..053
-          (render + UI — Ebiten only)
-
-        [Integration Tests]
-      TASK-075 (World.Step scenarios)
-      TASK-061 (world init smoke test)
-
-      [Unit Tests]
-  physics: TASK-070..073
-  sim:     TASK-074
-  input:   TASK-076..077
+npx tsc --noEmit
 ```
+
+**What it checks:**
+- `Boat.vx/vy/omega` optional fields are properly initialised before use
+- `MooringLine.naturalLength` is provided at every `push()` call site
+- `getCleatWorld()` return type `[number, number]` is used correctly
+- No `any` casts that would hide type errors
+- `THROTTLE_FORCE[boat.throttlePort]` indexing is in-bounds (TypeScript cannot verify this at compile time, but value constraints in interface-spec.md guard it at runtime)
+- Strict mode (`noUnusedLocals`, `noUnusedParameters`) enforced
+
+**Coverage:** 100% of new interfaces and function signatures are type-checked at compile time.
+
+**Threshold:** zero errors required before TASK-021 begins. One compiler error = task blocked.
 
 ---
 
-## Unit Tests
+## Layer 2 — Console Behavioral Assertions
 
-### Packages covered
-- `internal/physics` — Vec2, RigidBody, ForceAccumulator, Integrate, all force functions, SpringForce, CollisionPenalty
-- `internal/sim` — enums, Boat helpers, Dock, MooringLine
-- `internal/input` — Handler state machine, all key/mouse mappings, validation
-- `internal/render` — Viewport transforms only (no draw calls)
+Each force function has a documented "behavioral test" in its acceptance criteria. These are
+verified by opening `http://localhost:5173` (Vite dev server), dropping a monohull in play mode,
+then running assertions in the browser DevTools console.
 
-### Coverage targets
+### Assertion Template
 
-| Package | Minimum coverage |
-|---------|-----------------|
-| `internal/physics` | ≥ 90% |
-| `internal/sim` | ≥ 80% |
-| `internal/input` | ≥ 80% |
-| `internal/render` | ≥ 60% (viewport only; draw functions excluded) |
+```javascript
+// Hydrodynamic drag test (TASK-011)
+boats[0].vx = 0;
+boats[0].vy = 2;
+boats[0].vx = 0;
+boats[0].omega = 0;
+// call physicsStep manually is not possible (it's module-private),
+// but the assertion is: after ~1 second of play, vy decreases from 2 toward 0
+// verified by watching boats[0].vy in console
+```
 
-### Test style
-- Table-driven tests (`[]struct{ name, input, expected }`) for all function with multiple cases
-- One test file per source file: `vec2.go` → `vec2_test.go`
-- No mocks needed (all tested units are pure functions or value types with no external dependencies)
+Since `physicsStep` is module-scoped (not exported), behavioral assertions are verified by
+observation rather than direct function calls. The key behaviors are:
+
+| Behavior | Observable indicator |
+|----------|---------------------|
+| Drag decelerates boat | `boats[0].vy` decreases over time |
+| Thrust accelerates | Speed at full throttle reaches ~2-4 m/s |
+| Prop walk yaws | `boats[0].omega` non-zero at full astern |
+| Rudder turns boat | Heading changes at speed with rudder applied |
+| Wind drifts boat | Position changes slowly in wind direction |
+| Line holds boat | Position oscillates near natural length, not beyond |
+| Pier stops boat | Boat heading toward pier decelerates and stops |
 
 ---
 
-## Integration Tests
+## Layer 3 — Manual Smoke Tests (TASK-021)
 
-### World.Step scenarios (TASK-075)
-File: `internal/sim/world_test.go`
+Nine smoke tests defined in TASK-021, each covering one physics feature.
+These are the **acceptance gate** — all nine must pass before implementation is considered done.
 
-These tests run the full simulation loop (physics + sim, no render) for N steps and assert on macro outcomes. They validate that the force model produces physically plausible behaviour without requiring tuned constants to be exact.
+### Smoke Test Checklist
 
-| Test name | Steps | Assert |
-|-----------|-------|--------|
-| `TestBoatCoastsToStop` | 600 (10s) | Final speed < 0.1 m/s |
-| `TestMooringHoldsBoat` | 1800 (30s) | Lateral displacement < 2 m |
-| `TestThrottleForwardAccelerates` | 300 (5s) | Speed > 1 m/s |
-| `TestPropWalkInAstern` | 180 (3s) | Lateral displacement > 0 (port) |
-| `TestCollisionPushesBoatAway` | 6 (0.1s) | Boat outside dock polygon |
-
-### Smoke test (TASK-061)
-Run 600 steps of the default world with no input. Assert: no panic, no NaN in any boat position or velocity.
-
----
-
-## Race Detector
-
-All non-render tests must pass with `-race`:
-```
-go test -race ./internal/physics/... ./internal/sim/... ./internal/input/...
-```
-
-The game loop runs on a single goroutine (Ebiten model), so there is no concurrency in production code. The race detector run validates no accidental goroutine is spawned.
+| # | Feature | Pass signal | Fail signal |
+|---|---------|-------------|-------------|
+| 1 | Stationary in play mode | Boat does not drift | Boat moves without input |
+| 2 | Throttle / terminal velocity | Boat reaches ~5 m/s, holds | Boat accelerates forever or barely moves |
+| 3 | Rudder at speed | Heading changes smoothly | No turn, or violent spin |
+| 4 | Prop walk (astern) | Yaw with near-zero forward speed | No rotation, or rotation is wrong direction |
+| 5 | Wind drift | Very slow lateral drift, boat does not rotate significantly | Fast drift or no drift at all |
+| 6 | Mooring holds boat | Boat stays within ~2 m of attach point | Line passes through, or oscillates wildly |
+| 7 | Pier collision | Boat decelerates at pier face | Boat passes through pier |
+| 8 | Catamaran differential throttle | Boat turns toward lower-throttle engine side | No turn, or turn toward wrong side |
+| 9 | Mode switch | Velocity reset to zero on re-entry | Boat teleports or keeps phantom velocity |
 
 ---
 
-## WASM Build Verification
+## What Cannot Be Tested Without a Test Runner
 
-WASM compilation is not a unit test but is a required CI check:
-```
-GOOS=js GOARCH=wasm go build -o main.wasm .
-```
-This must pass after every change to catch WASM-incompatible imports (CGO, net, os/file).
+| Concern | Risk | Mitigation |
+|---------|------|-----------|
+| Spring constant stability at edge dt | Oscillation if `MOORING_K/MOORING_C` ratio is large | TASK-022 5-minute stability test |
+| NaN propagation from division by zero | `dist < 1e-6` guard in TASK-015 | Type check + guard in code |
+| Throttle index out of bounds | `boat.throttlePort` outside 0..4 | Existing slider clamps; documented in interface-spec.md |
+| Catamaran lateral arm constant hard-coded | Wrong torque if SVG changes | Commented with derivation; recalculate if SVG changes |
 
 ---
 
-## Test Commands
+## Recommended Future Step: Add Vitest
+
+After physics is implemented and smoke-tested, adding [Vitest](https://vitest.dev/) would allow:
+- Direct unit tests on `physicsStep` by factoring out pure force functions
+- Automated regression on constant changes
+- Coverage measurement
+
+This is out of scope for the current task but would be the natural next evolution.
+Estimated setup effort: 2 hours to configure + extract pure functions.
+
+---
+
+## Build and Check Commands
 
 ```bash
-# Run all native unit + integration tests
-go test ./internal/...
+# Type check (required before each commit)
+npx tsc --noEmit
 
-# With race detector
-go test -race ./internal/physics/... ./internal/sim/... ./internal/input/...
+# Dev server (for smoke tests)
+make serve
+# or:
+npx vite
 
-# With coverage
-go test -coverprofile=coverage.out ./internal/physics/... ./internal/sim/...
-go tool cover -html=coverage.out
+# Production build (Vite bundles TypeScript)
+npx vite build
 
-# Specific integration test
-go test -run TestWorldStep ./internal/sim/...
-
-# Static analysis
-go vet ./...
-staticcheck ./...
-
-# Vulnerability scan
-govulncheck ./...
-
-# WASM build check
-GOOS=js GOARCH=wasm go build -o /dev/null .   # Unix
-# Windows: GOOS=js GOARCH=wasm go build -o NUL .
+# Lint (if eslint is configured)
+npx eslint src/main.ts
 ```
 
 ---
 
-## What Is NOT Tested Automatically
+## Coverage Threshold
 
-| Component | Reason | How verified |
-|-----------|--------|-------------|
-| `internal/render` draw calls | Requires Ebiten display context | Manual visual check |
-| `internal/ui` panels | Requires Ebiten display context | Manual visual check |
-| WASM browser execution | Requires browser + JS runtime | Manual: open `http://localhost:8080` |
-| Mooring line colour thresholds | Colour lookup helper is testable; pixel output is not | Unit test on colour-lookup function only |
-
----
-
-## CI Environment
-
-No CI server is configured yet. When added, the following must all pass on push:
-
-1. `go build ./...` (native)
-2. `GOOS=js GOARCH=wasm go build -o main.wasm .`
-3. `go test -race ./internal/...`
-4. `go vet ./...`
-5. `govulncheck ./...` (non-blocking on informational findings, blocking on high severity)
-
-No sandbox, secrets, or environment variables required — the entire application is deterministic pure-Go with no external dependencies at runtime.
-
----
-
-## Coverage Enforcement
-
-Recommended: add to `Makefile`:
-```makefile
-test-coverage:
-	go test -coverprofile=coverage.out ./internal/physics/... ./internal/sim/...
-	go tool cover -func=coverage.out | grep -E "total|physics|sim"
-	@go tool cover -func=coverage.out | tail -1 | awk '{if ($$3+0 < 80) {print "Coverage below 80%"; exit 1}}'
-```
+| Layer | Target |
+|-------|--------|
+| Type check (`tsc --noEmit`) | 0 errors (hard gate) |
+| Behavioral assertions | All 7 table entries observable |
+| Manual smoke tests | All 9 smoke tests pass |
+| Physics stability (5-min run) | Zero NaN/Infinity in `boat.x/y` |
